@@ -157,11 +157,9 @@ export async function uploadScreenshot(scanId: string, checkId: string, file: Fi
 }
 
 export async function requestPdfReport(scanId: string): Promise<{ url: string }> {
-  const headers = await getAuthHeaders()
-  const res = await fetch(`${API_URL}/scan/${scanId}/report`, {
-    method: 'POST',
-    headers,
-  })
-  if (!res.ok) throw new Error('Failed to generate report.')
-  return res.json()
+  // Opens a print-friendly report page in a new tab.
+  // User can Cmd+P / Ctrl+P to save as PDF.
+  const url = `/report/${scanId}`
+  window.open(url, '_blank')
+  return { url }
 }
