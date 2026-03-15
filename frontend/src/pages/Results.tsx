@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useEffect, useState, useRef } from 'react'
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import ScoreCircle from '../components/ScoreCircle'
 import CheckResult from '../components/CheckResult'
@@ -28,6 +28,7 @@ function isPaid(tier: string | undefined): boolean {
 
 export default function Results() {
   const { scanId } = useParams<{ scanId: string }>()
+  const [searchParams] = useSearchParams()
   const { user } = useAuth()
   const navigate = useNavigate()
 
@@ -36,11 +37,17 @@ export default function Results() {
   const [error, setError] = useState<string | null>(null)
   const [downloadingPdf, setDownloadingPdf] = useState(false)
   const [pollCount, setPollCount] = useState(0)
+  const [paymentSuccess, setPaymentSuccess] = useState(false)
+  const paymentPollRef = useRef(0)
 
   useEffect(() => {
     if (!scanId) {
       navigate('/')
       return
+    }
+    // Detect Stripe success redirect
+    if (searchParams.get('payment') === 'success') {
+      setPaymentSuccess(true)
     }
     fetchResults()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -61,6 +68,20 @@ export default function Results() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, pollCount])
+
+  // After payment success, keep re-fetching until tier is upgraded (webhook may take 2-5s)
+  useEffect(() => {
+    if (!paymentSuccess || !scan) return
+    if (isPaid(scan.tier)) return  // already upgraded, stop
+    if (paymentPollRef.current >= 10) return  // gave up after ~20s
+
+    const timer = setTimeout(async () => {
+      paymentPollRef.current += 1
+      await fetchResults()
+    }, 2000)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentSuccess, scan])
 
   async function fetchResults() {
     if (!scanId) return
@@ -179,6 +200,25 @@ export default function Results() {
             {new Date(scan.created_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
           </p>
         </div>
+
+        {/* Payment success banner */}
+        {paymentSuccess && (
+          <div className={`rounded-xl p-4 mb-6 flex items-center gap-3 ${isPaid(scan.tier) ? 'bg-green-50 border border-green-200' : 'bg-blue-50 border border-blue-200'}`}>
+            {isPaid(scan.tier) ? (
+              <>
+                <svg className="w-5 h-5 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                </svg>
+                <p className="text-sm font-medium text-green-800">Payment confirmed — your full report is now unlocked.</p>
+              </>
+            ) : (
+              <>
+                <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                <p className="text-sm font-medium text-blue-800">Payment received — unlocking your report…</p>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Score + summary */}
         <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 sm:p-8 mb-6">
