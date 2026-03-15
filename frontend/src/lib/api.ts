@@ -14,6 +14,7 @@ async function getAuthHeaders(): Promise<HeadersInit> {
 export interface StartScanPayload {
   url: string
   profession: 'real_estate' | 'mortgage'
+  email?: string
 }
 
 export interface StartScanResponse {
