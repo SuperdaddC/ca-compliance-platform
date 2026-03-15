@@ -1,7 +1,7 @@
 """
 rule_engine.py — California RE/Lending Compliance Rule Engine
-Runs inside AWS Lambda. Receives scraped page HTML + text, executes 10
-compliance checks, and returns a structured result dict.
+Runs inside AWS Lambda. Receives scraped page HTML + text, executes 17
+active compliance checks (R01–R11, R13–R18), and returns a structured result dict.
 
 Dependencies: re, html.parser (stdlib only — BeautifulSoup used if available
 but gracefully degrades to stdlib html.parser for robustness in Lambda).
@@ -166,7 +166,7 @@ def check_dre_license(text: str) -> dict:
                 "status": "pass",
                 "message": f"DRE license number {number} found.",
                 "remediation": None,
-                "evidence": _truncate(upper[max(0, pos-15):pos+9]),
+                "evidence": _truncate(text[max(0, pos-15):pos+9]),
                 "screenshot_required": False,
             }
 
@@ -1283,19 +1283,6 @@ def check_r11(html: str, text: str, profession: str) -> dict:
                 "screenshot_required": False,
             }
 
-    # Also check NMLS in upper-case form (canonical)
-    nmls_m = re.search(r'\bNMLS(?:R)?\s*(?:#|:|\s+ID\s*:?)?\s*\d{6,10}\b', upper)
-    if nmls_m:
-        return {
-            "rule_id": "R11",
-            "rule_name": "DFPI License Disclosure in Lending Ads",
-            "status": "pass",
-            "message": "NMLS license disclosure found on lending advertisement page.",
-            "remediation": None,
-            "evidence": _truncate(nmls_m.group(0)),
-            "screenshot_required": False,
-        }
-
     return {
         "rule_id": "R11",
         "rule_name": "DFPI License Disclosure in Lending Ads",
@@ -1413,9 +1400,10 @@ def check_r13(html: str, text: str, profession: str) -> dict:
         if not _R13_MAX_APR_PATTERN.search(text):
             fail_msgs.append("HELOC variable-rate ad is missing maximum APR disclosure (12 CFR §1026.16(d)(1)(iii))")
 
-        # Warning: "fixed" without time period in HELOC context
-        if re.search(r'\bfixed\b', lower) and not re.search(r'\bfixed\s+for\s+\d+\s+(?:year|month|yr|mo)', lower):
-            warn_msgs.append("'Fixed' rate used in HELOC context without specifying the fixed period — may mislead consumers (12 CFR §1026.16(f))")
+        # Warning: "fixed rate" without time period in HELOC context
+        # Use fixed[\s-]rate to avoid false positives on "fixed closing date", "fixed inspection", etc.
+        if re.search(r'\bfixed[\s-]rate\b', lower) and not re.search(r'\bfixed[\s-]?(?:rate\s+)?for\s+\d+\s+(?:year|month|yr|mo)', lower):
+            warn_msgs.append("'Fixed rate' used in HELOC context without specifying the fixed period — may mislead consumers (12 CFR §1026.16(f))")
 
     if not fail_msgs and not warn_msgs:
         return {
@@ -1478,9 +1466,10 @@ _COUNSELOR_MISUSE_PATTERN = re.compile(
 )
 
 _FIXED_ARM_MISMATCH_PATTERN = re.compile(
-    r'(?:(?:adjustable|variable|arm)[^.!?]{0,250}(?:fixed\s+(?:rate|payment|mortgage))'
-    r'|(?:fixed\s+(?:rate|payment|mortgage))[^.!?]{0,250}(?:adjustable|variable|arm))',
-    re.DOTALL | re.IGNORECASE
+    # Tightened from 250→80 chars and removed DOTALL to avoid cross-paragraph false positives
+    r'(?:(?:adjustable|variable|arm)[^.!?\n]{0,80}(?:fixed[\s-]rate|fixed\s+payment|fixed\s+mortgage)'
+    r'|(?:fixed[\s-]rate|fixed\s+payment|fixed\s+mortgage)[^.!?\n]{0,80}(?:adjustable|variable|arm))',
+    re.IGNORECASE
 )
 
 
@@ -1803,6 +1792,13 @@ def check_r17(html: str, text: str, profession: str) -> dict:
     Rule 17: CCPA §1798.135 'Do Not Sell or Share My Personal Information' Link
     Cal. Civ. Code §1798.135(a)(1) — homepage must have a prominent opt-out link.
     Applies to both real estate and lending professions.
+
+    Severity intentionally set to WARNING (not fail) because §1798.135 only requires
+    the opt-out link if the business "sells or shares" personal data with third parties.
+    Many small RE/lending sites do not sell data and are genuinely exempt.
+    By contrast, R06 (Privacy Policy) is a fail because §1798.100 requires a privacy
+    policy for any business collecting personal data — a much lower threshold with no
+    exemption for non-sellers.
     """
     lower = text.lower()
     parsed = _parse_html(html)
@@ -2146,12 +2142,12 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
     # R02: Responsible Broker Name — realestate only (B&P §10140.6(b)(1); CCR §2773)
     # Pass the DRE license from R01 so R02 can verify broker identity via DRE lookup.
     # The DRE number IS the broker's identity — no separate "Responsible Broker: Name" text required.
-    r01_result = next((c for c in checks if c["rule_id"] == "R01"), None)
+    # Extract DRE license directly from page text (not from R01 evidence string,
+    # which may be non-numeric on the NMLS-override path).
     r02_dre_license = None
-    if r01_result and r01_result.get("status") == "pass" and r01_result.get("evidence"):
-        lic_m = re.search(r'\b(\d{7,9})\b', r01_result["evidence"])
-        if lic_m:
-            r02_dre_license = lic_m.group(1)
+    dre_in_text = re.search(r'\b(?:DRE|BRE|CALBR[E]?)\s*#?\s*(\d{7,9})\b', text.upper())
+    if dre_in_text:
+        r02_dre_license = dre_in_text.group(1)
     if profession == "realestate":
         checks.append(check_broker_name(text, dre_license=r02_dre_license))
     else:
