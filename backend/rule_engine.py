@@ -14,6 +14,17 @@ import urllib.parse
 from html.parser import HTMLParser
 from typing import Optional
 
+# Module-level cache for DRE lookups within a single Lambda invocation.
+# Prevents multiple HTTP round-trips for the same license number when
+# both R01 and R02/R10 look up the same DRE number.
+_DRE_LOOKUP_CACHE: dict[str, bool] = {}
+_DRE_NAME_CACHE: dict[str, Optional[str]] = {}
+
+# R12 is reserved — was planned for RESPA AfBA disclosure but deferred
+# pending determination of whether the platform needs to check for
+# affiliated business arrangement disclosures. Gap is intentional.
+# R12 = RESPA §8(c)(4) Affiliated Business Arrangement Disclosure (future)
+
 # ─────────────────────────────────────────────
 # HTML Utilities
 # ─────────────────────────────────────────────
@@ -75,6 +86,9 @@ def _truncate(text: str, max_chars: int = 200) -> str:
 # Rule 1 — DRE / BRE License Number
 # ─────────────────────────────────────────────
 
+_BOT_UA = "Mozilla/5.0 (compatible; ComplianceBot/1.0; +https://complywithjudy.com)"
+
+
 def _lookup_dre_number(number: str) -> bool:
     """
     Query the DRE public license lookup (POST to publicasp/pplinfo.asp) to verify
@@ -83,21 +97,26 @@ def _lookup_dre_number(number: str) -> bool:
     Valid license response: ~5800 chars, contains "public information request complete"
     Invalid / not found:    ~18700 chars (full nav page), no completion marker
 
+    Results are cached per invocation to avoid redundant HTTP calls.
     Returns True if confirmed, False if not found or lookup fails.
     """
-    import urllib.request, urllib.parse
+    if number in _DRE_LOOKUP_CACHE:
+        return _DRE_LOOKUP_CACHE[number]
     try:
         data = urllib.parse.urlencode({"LICENSE_ID": number}).encode()
         req = urllib.request.Request(
             "https://www2.dre.ca.gov/publicasp/pplinfo.asp",
             data=data,
-            headers={"User-Agent": "Mozilla/5.0",
+            headers={"User-Agent": _BOT_UA,
                      "Content-Type": "application/x-www-form-urlencoded"},
         )
         with urllib.request.urlopen(req, timeout=6) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
-            return "public information request complete" in body.lower()
+            result = "public information request complete" in body.lower()
+            _DRE_LOOKUP_CACHE[number] = result
+            return result
     except Exception:
+        _DRE_LOOKUP_CACHE[number] = False
         return False  # network/timeout — don't fail the scan
 
 
@@ -366,7 +385,7 @@ _REG_Z_STRONG_TRIGGERS = [
     r'\b(?:fixed|adjustable)[\s-]+rate\s+mortgage\b',    # "fixed-rate mortgage"
     r'\b\d{2,3}[\s-]year\s+(?:fixed|arm|mortgage|loan)\b',  # "30-year fixed"
     r'\bdiscount\s+points?\b',                           # "discount points" (loan context)
-    r'\borgination\s+(?:fee|point)',                     # "origination fee/point"
+    r'\borigination\s+(?:fee|point)',                    # "origination fee/point"
 ]
 
 # WEAK triggers: terms that MIGHT appear in a credit ad context but are also
@@ -538,7 +557,8 @@ def _count_listing_photos(html: str) -> int:
         if not src:
             continue
         src_url = src.group(1).lower()
-        alt = (re.search(r'alt=["\']([^"\']*)["\']', attrs) or type('', (), {'group': lambda s, n: ''})()).group(1).lower()
+        alt_match = re.search(r'alt=["\']([^"\']*)["\']', attrs)
+        alt = alt_match.group(1).lower() if alt_match else ""
 
         # Skip obvious non-listing images
         if any(skip in alt for skip in ['logo', 'icon', 'nav', 'menu', 'banner', 'mls logo', 'company']):
@@ -843,6 +863,36 @@ def check_equal_housing(html: str, text: str) -> dict:
 # Rule 9 — Team Name Compliance (realestate only)
 # ─────────────────────────────────────────────
 
+# Module-level constants (hoisted from check_team_name_compliance for efficiency)
+_TEAM_NAV_PHRASES = {
+    'meet the team', 'our team', 'join the team', 'the team',
+    'meet our team', 'contact our team', 'contact the team',
+    'about our team', 'our group', 'the group', 'leadership team',
+    'management team', 'support team', 'sales team', 'advisory group',
+    'executive team', 'founding team', 'core team', 'about our group',
+    'estate school', 'school team',
+}
+_TEAM_NAV_GENERIC = {
+    'first', 'best', 'top', 'prime', 'elite', 'luxury', 'coastal', 'bay', 'pacific',
+    'golden', 'premier', 'prestige', 'real', 'estate', 'realty', 'property', 'homes',
+    'properties', 'partners', 'presence', 'legacy', 'vision', 'pinnacle', 'horizon',
+    'summit', 'apex', 'harbor', 'haven', 'crest', 'ridge', 'view', 'vista', 'point',
+    'village', 'metro', 'urban', 'local', 'new', 'one', 'key', 'core', 'arc',
+    'leadership', 'management', 'support', 'sales', 'advisory', 'executive',
+    'founding', 'school', 'national', 'regional', 'professional', 'certified',
+    'about', 'blog', 'home', 'news', 'contact', 'menu', 'search', 'services',
+    'more', 'info', 'learn', 'join', 'meet', 'find', 'buy', 'sell', 'rent',
+}
+_TEAM_BRAND_WORDS = {
+    'first', 'best', 'top', 'prime', 'elite', 'luxury', 'coastal', 'bay', 'pacific',
+    'golden', 'premier', 'prestige', 'century', 'compass', 'coldwell', 'berkshire',
+    'keller', 'sotheby', 'remax', 'redfin', 'zillow', 'real', 'estate', 'realty',
+    'property', 'homes', 'properties', 'group', 'team', 'associates', 'partners',
+    'presence', 'legacy', 'vision', 'pinnacle', 'horizon', 'summit', 'apex',
+    'harbor', 'haven', 'crest', 'ridge', 'view', 'vista', 'point', 'pointe',
+    'village', 'metro', 'urban', 'local', 'new', 'one', 'key', 'core', 'arc',
+}
+
 def check_team_name_compliance(text: str) -> dict:
     """
     Rule 9: Team Name Compliance (realestate only)
@@ -858,15 +908,6 @@ def check_team_name_compliance(text: str) -> dict:
     #   2. Is 2-4 words max (branded names are short)
     #   3. Not a known generic/nav phrase
     #   4. Not pure lowercase (nav text like "leadership team" is all lower in inner_text)
-    _nav_phrases = {
-        'meet the team', 'our team', 'join the team', 'the team',
-        'meet our team', 'contact our team', 'contact the team',
-        'about our team', 'our group', 'the group', 'leadership team',
-        'management team', 'support team', 'sales team', 'advisory group',
-        'executive team', 'founding team', 'core team', 'about our group',
-        'estate school', 'school team',
-    }
-
     # Collapse newlines/tabs into single spaces before matching
     # (Playwright inner_text has \n between nav items — prevents cross-line false matches)
     text_flat = re.sub(r'[\r\n\t]+', ' ', text)
@@ -886,21 +927,9 @@ def check_team_name_compliance(text: str) -> dict:
         core_raw = re.sub(r'^(?:the|a|an)\s+', '', matched_raw, flags=re.IGNORECASE).strip()
         core_raw = re.sub(r'\s+(?:team|group|associates)$', '', core_raw, flags=re.IGNORECASE).strip()
         core_words_raw = core_raw.split()               # original case
-        _nav_generic = {
-            'first', 'best', 'top', 'prime', 'elite', 'luxury', 'coastal', 'bay', 'pacific',
-            'golden', 'premier', 'prestige', 'real', 'estate', 'realty', 'property', 'homes',
-            'properties', 'partners', 'presence', 'legacy', 'vision', 'pinnacle', 'horizon',
-            'summit', 'apex', 'harbor', 'haven', 'crest', 'ridge', 'view', 'vista', 'point',
-            'village', 'metro', 'urban', 'local', 'new', 'one', 'key', 'core', 'arc',
-            'leadership', 'management', 'support', 'sales', 'advisory', 'executive',
-            'founding', 'school', 'national', 'regional', 'professional', 'certified',
-            # common nav words
-            'about', 'blog', 'home', 'news', 'contact', 'menu', 'search', 'services',
-            'more', 'info', 'learn', 'join', 'meet', 'find', 'buy', 'sell', 'rent',
-        }
-        # A word is generic if: in nav_generic dict OR all-caps (nav label like ABOUT/BLOG/HOME)
-        all_generic = all(w.lower() in _nav_generic or w.isupper() for w in core_words_raw)
-        if (matched_phrase in _nav_phrases
+        # A word is generic if: in module-level _TEAM_NAV_GENERIC OR all-caps (nav label)
+        all_generic = all(w.lower() in _TEAM_NAV_GENERIC or w.isupper() for w in core_words_raw)
+        if (matched_phrase in _TEAM_NAV_PHRASES
                 or any(matched_phrase.startswith(p) for p in ('meet', 'our ', 'join', 'about', 'contact'))
                 or not core_words_raw
                 or all_generic):
@@ -925,15 +954,6 @@ def check_team_name_compliance(text: str) -> dict:
     # Check for a personal surname (Title Case word) directly adjacent to Team/Group/Associates.
     # Must look like "Smith Team", "Johnson Group" — a person's last name, not a brand.
     # Exclude known brand words that are NOT surnames.
-    _brand_words = {
-        'first', 'best', 'top', 'prime', 'elite', 'luxury', 'coastal', 'bay', 'pacific',
-        'golden', 'premier', 'prestige', 'century', 'compass', 'coldwell', 'berkshire',
-        'keller', 'sotheby', 'remax', 'redfin', 'zillow', 'real', 'estate', 'realty',
-        'property', 'homes', 'properties', 'group', 'team', 'associates', 'partners',
-        'presence', 'legacy', 'vision', 'pinnacle', 'horizon', 'summit', 'apex',
-        'harbor', 'haven', 'crest', 'ridge', 'view', 'vista', 'point', 'pointe',
-        'village', 'metro', 'urban', 'local', 'new', 'one', 'key', 'core', 'arc',
-    }
     surname_match = re.search(
         r'\b([A-Z][a-z]{2,})\s+(?:Team|Group|Associates|Realty\s+Group)\b',
         text
@@ -941,7 +961,7 @@ def check_team_name_compliance(text: str) -> dict:
     has_surname = False
     if surname_match:
         candidate = surname_match.group(1).lower()
-        if candidate not in _brand_words:
+        if candidate not in _TEAM_BRAND_WORDS:
             has_surname = True
 
     if has_dre and has_surname:
@@ -989,11 +1009,13 @@ def _lookup_dre_name(license_number: str) -> Optional[str]:
     """
     Look up the DRE-licensed name for a given license number via the public DRE website.
     Returns the licensed name string, or None if lookup fails.
+    Results are cached per invocation to avoid redundant HTTP calls.
     https://www2.dre.ca.gov/publicasp/pplinfo.asp
     """
+    lic = re.sub(r'\D', '', license_number)
+    if lic in _DRE_NAME_CACHE:
+        return _DRE_NAME_CACHE[lic]
     try:
-        # Strip non-digits
-        lic = re.sub(r'\D', '', license_number)
         data = urllib.parse.urlencode({
             "h_nextstep": "SEARCH",
             "LICENSEE_NAME": "",
@@ -1004,7 +1026,7 @@ def _lookup_dre_name(license_number: str) -> Optional[str]:
             "https://www2.dre.ca.gov/publicasp/pplinfo.asp?start=1",
             data=data,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; ComplianceBot/1.0; +https://complywithjudy.com)",
+                "User-Agent": _BOT_UA,
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Referer": "https://www2.dre.ca.gov/publicasp/pplinfo.asp",
             }
@@ -1019,9 +1041,11 @@ def _lookup_dre_name(license_number: str) -> Optional[str]:
         )
         if name_match:
             name = re.sub(r'\s+', ' ', name_match.group(1)).strip()
+            _DRE_NAME_CACHE[lic] = name
             return name
     except Exception:
         pass
+    _DRE_NAME_CACHE[lic] = None
     return None
 
 
@@ -1959,14 +1983,18 @@ def check_r18(html: str, text: str, profession: str) -> dict:
 def _compute_score(checks: list[dict]) -> tuple[int, dict]:
     """
     Compute a 0–100 compliance score from check results.
-    Each applicable rule is worth equal points.
-    Pass = full, Warning = half, Fail = 0.
+    Only applicable rules count toward the score — "na" (not applicable)
+    rules are excluded from both numerator and denominator so they cannot
+    inflate the score of a failing site.
+    Pass = full point, Warning = half point, Fail = 0.
     Returns (score, summary_dict).
     """
-    passed = sum(1 for c in checks if c["status"] == "pass")
-    warnings = sum(1 for c in checks if c["status"] == "warning")
-    failed = sum(1 for c in checks if c["status"] == "fail")
-    total = len(checks)
+    applicable = [c for c in checks if c["status"] != "na"]
+    passed   = sum(1 for c in applicable if c["status"] == "pass")
+    warnings = sum(1 for c in applicable if c["status"] == "warning")
+    failed   = sum(1 for c in applicable if c["status"] == "fail")
+    na_count = len(checks) - len(applicable)
+    total    = len(applicable)
 
     if total == 0:
         score = 100
@@ -1974,12 +2002,13 @@ def _compute_score(checks: list[dict]) -> tuple[int, dict]:
         points = (passed * 1.0 + warnings * 0.5) / total
         score = round(points * 100)
 
-    screenshot_pending = any(c["screenshot_required"] for c in checks)
+    screenshot_pending = any(c["screenshot_required"] for c in applicable)
 
     summary = {
         "passed": passed,
         "warnings": warnings,
         "failed": failed,
+        "not_applicable": na_count,
         "screenshot_pending": screenshot_pending,
     }
     return score, summary
@@ -2127,7 +2156,7 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
         checks.append(check_broker_name(text, dre_license=r02_dre_license))
     else:
         checks.append({"rule_id": "R02", "rule_name": "Responsible Broker Name",
-            "status": "pass", "message": "Not applicable — real estate profession only.",
+            "status": "na", "message": "Not applicable — real estate profession only.",
             "remediation": None, "evidence": None, "screenshot_required": False})
 
     # R03: NMLS ID — lending only (SAFE Act; B&P §10140.6(b)(1))
@@ -2135,7 +2164,7 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
         checks.append(check_nmls_id(text))
     else:
         checks.append({"rule_id": "R03", "rule_name": "NMLS License Number",
-            "status": "pass", "message": "Not applicable — lending profession only.",
+            "status": "na", "message": "Not applicable — lending profession only.",
             "remediation": None, "evidence": None, "screenshot_required": False})
 
     # R04: Reg Z Trigger Terms — lending only (12 CFR §1026.24)
@@ -2143,7 +2172,7 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
         checks.append(check_reg_z_triggers(text))
     else:
         checks.append({"rule_id": "R04", "rule_name": "Reg Z Trigger Terms",
-            "status": "pass", "message": "Not applicable — lending profession only.",
+            "status": "na", "message": "Not applicable — lending profession only.",
             "remediation": None, "evidence": None, "screenshot_required": False})
 
     # R05: AB 723 Altered Image Disclosure — realestate only (Civil Code §1947.2)
@@ -2151,7 +2180,7 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
         checks.append(check_ab723_disclosure(html, text))
     else:
         checks.append({"rule_id": "R05", "rule_name": "AB 723 Altered Image Disclosure",
-            "status": "pass", "message": "Not applicable — real estate profession only.",
+            "status": "na", "message": "Not applicable — real estate profession only.",
             "remediation": None, "evidence": None, "screenshot_required": False})
 
     # R06: CCPA Privacy Policy — all professions (CIV §1798.135)
@@ -2162,7 +2191,7 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
         checks.append(check_dfpi_prohibited_claims(text))
     else:
         checks.append({"rule_id": "R07", "rule_name": "DFPI Prohibited Claims",
-            "status": "pass", "message": "Not applicable — lending profession only.",
+            "status": "na", "message": "Not applicable — lending profession only.",
             "remediation": None, "evidence": None, "screenshot_required": False})
 
     # R08: Equal Housing Opportunity — all professions (42 U.S.C. §3604)
@@ -2173,7 +2202,7 @@ def check_compliance(html: str, text: str, url: str, profession: str) -> dict:
         checks.append(check_team_name_compliance(text))
     else:
         checks.append({"rule_id": "R09", "rule_name": "Team Name Compliance",
-            "status": "pass", "message": "Not applicable — real estate profession only.",
+            "status": "na", "message": "Not applicable — real estate profession only.",
             "remediation": None, "evidence": None, "screenshot_required": False})
 
     # R10: DBA / Fictitious Name Disclosure — all professions
