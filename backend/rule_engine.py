@@ -19,6 +19,10 @@ from typing import Optional
 # both R01 and R02/R10 look up the same DRE number.
 _DRE_LOOKUP_CACHE: dict[str, bool] = {}
 _DRE_NAME_CACHE: dict[str, Optional[str]] = {}
+# Cache staleness note: these dicts persist for the lifetime of the Lambda container
+# (typically 15 min – several hours on a warm instance). A license suspended mid-day
+# will return a cached True until the container recycles. Acceptable at current scale —
+# revisit with TTL eviction if scan volume grows significantly.
 
 # R12 is reserved — was planned for RESPA AfBA disclosure but deferred
 # pending determination of whether the platform needs to check for
@@ -126,7 +130,7 @@ def check_dre_license(text: str) -> dict:
 
     Strategy (Mike's approach):
       1. Find all bare 8-digit numbers on the page: \\b\\d{8}\\b
-      2. For each, look at up to 40 chars BEFORE the number to classify the label
+      2. For each, look at up to 80 chars BEFORE the number to classify the label
       3. Label type determines confidence level:
          - DRE / BRE / CalBRE label → strong pass
          - Lic# / License label     → pass (label is non-standard but number is disclosed)
@@ -144,8 +148,9 @@ def check_dre_license(text: str) -> dict:
     candidates = [(m.start(), m.group(0)) for m in re.finditer(r'\b(\d{8})\b', text)]
 
     for pos, number in candidates:
-        # Grab up to 40 chars before the number to inspect the label
-        look_back = upper[max(0, pos - 40): pos].strip()
+        # Grab up to 80 chars before the number to inspect the label.
+        # IDX footer templates often have extra whitespace between label <span> and number <span>.
+        look_back = upper[max(0, pos - 80): pos].strip()
 
         # Skip phone-number-adjacent context (unlikely but guard against 8-digit local numbers)
         # Phone fragments tend to have dashes/parens right before them
@@ -526,11 +531,15 @@ _AB723_DISCLOSURES = [
 ]
 
 
-def _count_listing_photos(html: str) -> int:
+def _count_listing_photos(html: str) -> tuple:
     """
     Count images that are likely MLS/property listing photos based on their src URL.
     Excludes logos, icons, nav images, and UI elements.
     AB 723 applies to listing photos — not site furniture.
+
+    Returns (count: int, unrecognized_domains: list[str]) so the caller can log
+    CDN domains that didn't match any known pattern — useful for catching gaps
+    in the CDN list as MLS providers rotate infrastructure.
     """
     # Known MLS/listing photo CDN patterns
     listing_src_patterns = [
@@ -551,6 +560,7 @@ def _count_listing_photos(html: str) -> int:
     ]
     # Also catch any img where alt text is blank or generic (typical for listing photos)
     listing_count = 0
+    unrecognized_domains = []
     for m in re.finditer(r'<img\b([^>]*)>', html, re.IGNORECASE):
         attrs = m.group(1)
         src = re.search(r'src=["\']([^"\']+)["\']', attrs)
@@ -567,12 +577,23 @@ def _count_listing_photos(html: str) -> int:
             continue
 
         # Count if src matches known listing CDN
+        matched = False
         for pattern in listing_src_patterns:
             if re.search(pattern, src_url):
                 listing_count += 1
+                matched = True
                 break
 
-    return listing_count
+        # Log unrecognized external domains for CDN coverage gap detection
+        if not matched and src_url.startswith('http'):
+            try:
+                domain = src_url.split('/')[2]
+                if domain not in unrecognized_domains:
+                    unrecognized_domains.append(domain)
+            except IndexError:
+                pass
+
+    return listing_count, unrecognized_domains
 
 
 def check_ab723_disclosure(html: str, text: str) -> dict:
@@ -584,10 +605,10 @@ def check_ab723_disclosure(html: str, text: str) -> dict:
     lower = text.lower()
 
     # Only check listing photos, not all images
-    listing_photo_count = _count_listing_photos(html)
+    listing_photo_count, unrecognized_cdn_domains = _count_listing_photos(html)
 
     if listing_photo_count == 0:
-        return {
+        result = {
             "rule_id": "R05",
             "rule_name": "AB 723 Altered Image Disclosure",
             "status": "pass",
@@ -596,6 +617,11 @@ def check_ab723_disclosure(html: str, text: str) -> dict:
             "evidence": None,
             "screenshot_required": False,
         }
+        if unrecognized_cdn_domains:
+            # Surface unrecognized external image domains so production scan logs can
+            # catch gaps in the CDN list as MLS providers rotate infrastructure.
+            result["unrecognized_img_domains"] = unrecognized_cdn_domains
+        return result
 
     # Listing photos present — check for disclosure text
     parsed = _parse_html(html)
@@ -603,7 +629,7 @@ def check_ab723_disclosure(html: str, text: str) -> dict:
     for pattern in _AB723_DISCLOSURES:
         m = re.search(pattern, all_text)
         if m:
-            return {
+            r = {
                 "rule_id": "R05",
                 "rule_name": "AB 723 Altered Image Disclosure",
                 "status": "pass",
@@ -612,8 +638,11 @@ def check_ab723_disclosure(html: str, text: str) -> dict:
                 "evidence": _truncate(m.group(0)),
                 "screenshot_required": False,
             }
+            if unrecognized_cdn_domains:
+                r["unrecognized_img_domains"] = unrecognized_cdn_domains
+            return r
 
-    return {
+    r = {
         "rule_id": "R05",
         "rule_name": "AB 723 Altered Image Disclosure",
         "status": "warning",
@@ -631,6 +660,9 @@ def check_ab723_disclosure(html: str, text: str) -> dict:
         "evidence": f"{listing_photo_count} listing photo(s) found; no alteration disclosure text detected.",
         "screenshot_required": True,
     }
+    if unrecognized_cdn_domains:
+        r["unrecognized_img_domains"] = unrecognized_cdn_domains
+    return r
 
 
 # ─────────────────────────────────────────────
@@ -955,7 +987,8 @@ def check_team_name_compliance(text: str) -> dict:
     # Must look like "Smith Team", "Johnson Group" — a person's last name, not a brand.
     # Exclude known brand words that are NOT surnames.
     surname_match = re.search(
-        r'\b([A-Z][a-z]{2,})\s+(?:Team|Group|Associates|Realty\s+Group)\b',
+        # Supports hyphenated last names e.g. "Chen-Williams Team"
+        r'\b([A-Z][a-z]{2,}(?:-[A-Z][a-z]{2,})?)\s+(?:Team|Group|Associates|Realty\s+Group)\b',
         text
     )
     has_surname = False
