@@ -1,11 +1,22 @@
 """
 AWS Lambda Handler — Compliance Platform
-Receives a URL + profession, scrapes the page, runs the rule engine, stores results in Supabase.
+Routes requests to scan, checkout, and Stripe webhook handlers.
+
+Routes:
+  POST /scan        — scrape URL + run compliance rule engine
+  POST /checkout    — create Stripe Checkout session (returns redirect URL)
+  POST /webhook     — Stripe webhook: unlock paid tier after payment
+  OPTIONS *         — CORS preflight
 """
 
 import json
 import os
 import traceback
+import hashlib
+import hmac
+import urllib.request
+import urllib.parse
+import base64
 from datetime import datetime, timezone
 
 from playwright.sync_api import sync_playwright
@@ -14,8 +25,121 @@ from rule_engine import check_compliance
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+STRIPE_SK = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+# Mapping price IDs → tier name stored in Supabase
+PRICE_TIER_MAP = {
+    "price_1TAxj8Rxek7i9f8M38qngJUD": "single",   # $19 Single Scan
+    "price_1TAxj9Rxek7i9f8MZt4Nt5kO": "fix_verify", # $39 Fix & Verify
+    "price_1TAxj9Rxek7i9f8MvOjyUlss": "pro",       # $39/mo
+    "price_1TAxjIRxek7i9f8MSi8s1NlO": "pro",       # $374/yr
+    "price_1TAxjARxek7i9f8MAVtqXhUb": "broker",    # $199/mo
+    "price_1TAxjIRxek7i9f8M5rrM6q2s": "broker",    # $1910/yr
+}
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+def _stripe_request(method: str, path: str, params: dict = None) -> dict:
+    """Make a raw HTTP request to the Stripe API (no stripe-python dependency needed)."""
+    url = f"https://api.stripe.com{path}"
+    auth = base64.b64encode(f"{STRIPE_SK}:".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    data = urllib.parse.urlencode(params or {}).encode() if params else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = json.loads(e.read())
+        raise RuntimeError(f"Stripe error {e.code}: {body.get('error', {}).get('message', str(body))}")
+
+
+def handle_checkout(body: dict) -> dict:
+    """
+    Create a Stripe Checkout session and return the redirect URL.
+    Body: { price_id, scan_id? }
+    """
+    price_id = body.get("price_id", "").strip()
+    scan_id = body.get("scan_id", "").strip()
+
+    if not price_id or price_id not in PRICE_TIER_MAP:
+        return _response(400, {"error": "Invalid price_id"})
+
+    frontend_base = os.environ.get("FRONTEND_URL", "https://complywithjudy.com")
+    success_url = f"{frontend_base}/results/{scan_id}?payment=success" if scan_id else f"{frontend_base}/?payment=success"
+    cancel_url = f"{frontend_base}/results/{scan_id}?payment=cancelled" if scan_id else f"{frontend_base}/"
+
+    params = {
+        "mode": "payment" if PRICE_TIER_MAP[price_id] in ("single", "fix_verify") else "subscription",
+        "line_items[0][price]": price_id,
+        "line_items[0][quantity]": "1",
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "metadata[scan_id]": scan_id,
+        "metadata[price_id]": price_id,
+    }
+
+    try:
+        session = _stripe_request("POST", "/v1/checkout/sessions", params)
+        return _response(200, {"url": session["url"], "session_id": session["id"]})
+    except Exception as e:
+        print(f"Checkout error: {e}")
+        return _response(500, {"error": str(e)})
+
+
+def handle_webhook(body_raw: str, stripe_signature: str) -> dict:
+    """
+    Verify Stripe webhook signature and process checkout.session.completed.
+    Unlocks the paid tier on the associated scan in Supabase.
+    """
+    if not STRIPE_WEBHOOK_SECRET:
+        return _response(400, {"error": "Webhook secret not configured"})
+
+    # Verify signature
+    try:
+        parts = {p.split("=")[0]: p.split("=")[1] for p in stripe_signature.split(",")}
+        timestamp = parts.get("t", "")
+        sig = parts.get("v1", "")
+        signed_payload = f"{timestamp}.{body_raw}"
+        expected = hmac.new(
+            STRIPE_WEBHOOK_SECRET.encode(),
+            signed_payload.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return _response(400, {"error": "Invalid signature"})
+    except Exception as e:
+        return _response(400, {"error": f"Signature verification failed: {e}"})
+
+    try:
+        event = json.loads(body_raw)
+    except json.JSONDecodeError:
+        return _response(400, {"error": "Invalid JSON"})
+
+    if event.get("type") == "checkout.session.completed":
+        session = event.get("data", {}).get("object", {})
+        metadata = session.get("metadata", {})
+        scan_id = metadata.get("scan_id", "").strip()
+        price_id = metadata.get("price_id", "").strip()
+
+        if scan_id and price_id in PRICE_TIER_MAP:
+            tier = PRICE_TIER_MAP[price_id]
+            try:
+                supabase.table("scans").update({
+                    "tier": tier,
+                    "stripe_session_id": session.get("id"),
+                    "paid_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", scan_id).execute()
+                print(f"Scan {scan_id} unlocked as tier={tier}")
+            except Exception as e:
+                print(f"Supabase update failed for scan {scan_id}: {e}")
+
+    return _response(200, {"received": True})
 
 
 def scrape_page(url: str) -> dict:
@@ -94,17 +218,36 @@ def scrape_page(url: str) -> dict:
 
 def lambda_handler(event, context):
     """
-    Main Lambda entry point.
-
-    Expected event body:
-    {
-        "scan_id": "uuid",          # Supabase scan record (already created by frontend)
-        "url": "https://...",
-        "profession": "realestate" | "lending"
-    }
+    Main Lambda entry point — routes to scan, checkout, or webhook handler.
     """
+    # CORS preflight
+    method = event.get("httpMethod", event.get("requestContext", {}).get("http", {}).get("method", "POST"))
+    if method == "OPTIONS":
+        return _response(200, {})
+
+    # Route by path
+    path = event.get("path", event.get("rawPath", "/"))
+    body_raw = event.get("body", "{}")
+    if isinstance(body_raw, bytes):
+        body_raw = body_raw.decode()
+    if event.get("isBase64Encoded") and body_raw:
+        body_raw = base64.b64decode(body_raw).decode()
+
+    if path.rstrip("/").endswith("/checkout"):
+        try:
+            body = json.loads(body_raw) if body_raw else {}
+        except json.JSONDecodeError:
+            return _response(400, {"error": "Invalid JSON"})
+        return handle_checkout(body)
+
+    if path.rstrip("/").endswith("/webhook"):
+        sig = event.get("headers", {}).get("stripe-signature", "")
+        return handle_webhook(body_raw, sig)
+
+    # Default: scan handler
+    scan_id = None
     try:
-        body = json.loads(event.get("body", "{}")) if isinstance(event.get("body"), str) else event
+        body = json.loads(body_raw) if isinstance(body_raw, str) else body_raw
 
         scan_id = body.get("scan_id")
         url = body.get("url", "").strip()
