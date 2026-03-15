@@ -98,7 +98,7 @@ export default function Report() {
     )
   }
 
-  const checks = scan.results ?? []
+  const checks = (scan.results ?? []).filter((c) => c.status !== 'na')
   const passed   = checks.filter(c => c.status === 'pass').length
   const warnings = checks.filter(c => c.status === 'warn').length
   const failed   = checks.filter(c => c.status === 'fail').length

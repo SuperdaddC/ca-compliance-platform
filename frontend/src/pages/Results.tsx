@@ -169,7 +169,8 @@ export default function Results() {
     )
   }
 
-  const results = scan.results ?? []
+  // Filter out N/A checks (not applicable for this profession) before rendering
+  const results = (scan.results ?? []).filter((r) => r.status !== 'na')
   const passed = results.filter((r) => r.status === 'pass').length
   const warnings = results.filter((r) => r.status === 'warn').length
   const failed = results.filter((r) => r.status === 'fail').length
