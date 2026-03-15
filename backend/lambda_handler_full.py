@@ -27,6 +27,9 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 STRIPE_SK = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM = os.environ.get("RESEND_FROM", "ComplyWithJudy <onboarding@resend.dev>")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://complywithjudy.com")
 
 # Mapping price IDs → tier name stored in Supabase
 PRICE_TIER_MAP = {
@@ -57,6 +60,164 @@ def _stripe_request(method: str, path: str, params: dict = None) -> dict:
     except urllib.error.HTTPError as e:
         body = json.loads(e.read())
         raise RuntimeError(f"Stripe error {e.code}: {body.get('error', {}).get('message', str(body))}")
+
+
+def _send_email(to: str, subject: str, html: str) -> bool:
+    """Send an email via Resend API. Returns True on success."""
+    if not RESEND_API_KEY or not to:
+        return False
+    try:
+        payload = json.dumps({
+            "from": RESEND_FROM,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status < 300
+    except Exception as e:
+        print(f"Email send failed: {e}")
+        return False
+
+
+def _build_results_email(scan: dict, paid: bool) -> str:
+    """Build HTML email for scan results (free = score summary, paid = full report link)."""
+    url = scan.get("url", "")
+    score = scan.get("score", 0)
+    scan_id = scan.get("id", "")
+    results = scan.get("results") or {}
+    checks = results.get("checks", []) if isinstance(results, dict) else []
+
+    passed   = sum(1 for c in checks if c.get("status") == "pass")
+    warnings = sum(1 for c in checks if c.get("status") == "warning")
+    failed   = sum(1 for c in checks if c.get("status") == "fail")
+
+    score_color = "#16a34a" if score >= 80 else "#d97706" if score >= 60 else "#dc2626"
+    grade = "Good Standing" if score >= 80 else "Needs Attention" if score >= 60 else "Action Required"
+
+    report_link = f"{FRONTEND_URL}/report/{scan_id}"
+    results_link = f"{FRONTEND_URL}/results/{scan_id}"
+    upgrade_link = f"{FRONTEND_URL}/results/{scan_id}"
+
+    # Build failed checks list for paid users
+    failed_items_html = ""
+    if paid and checks:
+        fail_checks = [c for c in checks if c.get("status") == "fail"]
+        if fail_checks:
+            items = "".join(
+                f"""<tr>
+                  <td style="padding:10px 12px;border-bottom:1px solid #fee2e2;">
+                    <strong style="color:#111827;font-size:14px;">{c.get('rule_name','')}</strong><br>
+                    <span style="color:#6b7280;font-size:13px;">{c.get('message','')}</span>
+                    {"<br><span style='color:#374151;font-size:13px;margin-top:4px;display:block;'><strong>Fix:</strong> " + c.get('remediation','') + "</span>" if c.get('remediation') else ""}
+                  </td>
+                </tr>"""
+                for c in fail_checks[:10]
+            )
+            failed_items_html = f"""
+            <h3 style="color:#dc2626;font-size:15px;margin:24px 0 8px;">Violations to fix ({len(fail_checks)})</h3>
+            <table style="width:100%;border-collapse:collapse;background:#fef2f2;border-radius:8px;overflow:hidden;border:1px solid #fecaca;">
+              {items}
+            </table>"""
+
+    paid_section = f"""
+        <div style="text-align:center;margin:28px 0;">
+          <a href="{report_link}" style="display:inline-block;background:#2563eb;color:#fff;font-weight:700;font-size:15px;padding:14px 28px;border-radius:10px;text-decoration:none;">
+            Download PDF Report
+          </a>
+          <p style="color:#6b7280;font-size:12px;margin-top:8px;">Opens a print-ready report — use Ctrl+P / Cmd+P to save as PDF</p>
+        </div>
+        {failed_items_html}
+    """ if paid else f"""
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:20px;text-align:center;margin:24px 0;">
+          <p style="color:#92400e;font-size:14px;margin:0 0 14px;">
+            <strong>{failed} violation{"s" if failed != 1 else ""}</strong> found — upgrade to see exactly what to fix.
+          </p>
+          <a href="{upgrade_link}" style="display:inline-block;background:#d97706;color:#fff;font-weight:700;font-size:14px;padding:12px 24px;border-radius:8px;text-decoration:none;">
+            Get Fix Instructions — $19
+          </a>
+        </div>
+    """
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:32px 16px;">
+    <tr><td>
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+
+        <!-- Header -->
+        <tr><td style="background:#1e3a5f;padding:28px 32px;">
+          <p style="margin:0;color:#93c5fd;font-size:12px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;">complywithjudy.com</p>
+          <h1 style="margin:6px 0 0;color:#fff;font-size:22px;font-weight:800;">Your Compliance Report</h1>
+        </td></tr>
+
+        <!-- Score -->
+        <tr><td style="padding:28px 32px 0;">
+          <p style="margin:0 0 4px;font-size:13px;color:#6b7280;">Scanned URL</p>
+          <p style="margin:0 0 20px;font-size:15px;font-weight:600;color:#111827;word-break:break-all;">{url}</p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="text-align:center;background:#f9fafb;border-radius:12px;padding:20px;">
+                <p style="margin:0;font-size:48px;font-weight:800;color:{score_color};line-height:1;">{score}</p>
+                <p style="margin:4px 0 0;font-size:13px;color:#6b7280;">/100 &nbsp;·&nbsp; <strong style="color:{score_color};">{grade}</strong></p>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Summary pills -->
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;">
+            <tr>
+              <td width="33%" style="text-align:center;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;">
+                <p style="margin:0;font-size:22px;font-weight:800;color:#16a34a;">{passed}</p>
+                <p style="margin:2px 0 0;font-size:11px;font-weight:600;color:#16a34a;">Passed</p>
+              </td>
+              <td width="4%"></td>
+              <td width="29%" style="text-align:center;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;">
+                <p style="margin:0;font-size:22px;font-weight:800;color:#d97706;">{warnings}</p>
+                <p style="margin:2px 0 0;font-size:11px;font-weight:600;color:#d97706;">Warnings</p>
+              </td>
+              <td width="4%"></td>
+              <td width="30%" style="text-align:center;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;">
+                <p style="margin:0;font-size:22px;font-weight:800;color:#dc2626;">{failed}</p>
+                <p style="margin:2px 0 0;font-size:11px;font-weight:600;color:#dc2626;">Failed</p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- CTA / violations -->
+        <tr><td style="padding:0 32px 28px;">
+          {paid_section}
+          <p style="margin:20px 0 0;text-align:center;">
+            <a href="{results_link}" style="color:#2563eb;font-size:13px;">View full results online →</a>
+          </p>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#f9fafb;padding:16px 32px;border-top:1px solid #e5e7eb;">
+          <p style="margin:0;font-size:11px;color:#9ca3af;text-align:center;">
+            complywithjudy.com &nbsp;·&nbsp; California RE/Lending Compliance
+            <br>This is an automated report. Not legal advice.
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
 
 
 def handle_checkout(body: dict) -> dict:
@@ -136,6 +297,38 @@ def handle_webhook(body_raw: str, stripe_signature: str) -> dict:
                     "paid_at": datetime.now(timezone.utc).isoformat()
                 }).eq("id", scan_id).execute()
                 print(f"Scan {scan_id} unlocked as tier={tier}")
+
+                # Send paid report email using customer email from Stripe or scan record
+                customer_email = session.get("customer_details", {}).get("email", "")
+                if not customer_email:
+                    # Fall back to email stored on scan row
+                    scan_row = supabase.table("scans").select("email,url,score,results").eq("id", scan_id).single().execute()
+                    if scan_row.data:
+                        customer_email = scan_row.data.get("email", "") or ""
+                        scan_data = {
+                            "id": scan_id,
+                            "url": scan_row.data.get("url", ""),
+                            "score": scan_row.data.get("score", 0),
+                            "results": scan_row.data.get("results") or {},
+                        }
+                    else:
+                        scan_data = {"id": scan_id, "url": "", "score": 0, "results": {}}
+                else:
+                    scan_row = supabase.table("scans").select("url,score,results").eq("id", scan_id).single().execute()
+                    scan_data = {
+                        "id": scan_id,
+                        "url": scan_row.data.get("url", "") if scan_row.data else "",
+                        "score": scan_row.data.get("score", 0) if scan_row.data else 0,
+                        "results": scan_row.data.get("results") or {} if scan_row.data else {},
+                    }
+
+                if customer_email:
+                    _send_email(
+                        to=customer_email,
+                        subject=f"Your full compliance report is ready — {scan_data['url']}",
+                        html=_build_results_email(scan_data, paid=True)
+                    )
+                    print(f"Paid report email sent to {customer_email}")
             except Exception as e:
                 print(f"Supabase update failed for scan {scan_id}: {e}")
 
@@ -317,6 +510,15 @@ def lambda_handler(event, context):
             "results": results,
             "completed_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", scan_id).execute()
+
+        # Send free summary email if email was captured
+        if email:
+            scan_data = {"id": scan_id, "url": url, "score": results["score"], "results": results}
+            _send_email(
+                to=email,
+                subject=f"Your compliance score: {results['score']}/100 — {url}",
+                html=_build_results_email(scan_data, paid=False)
+            )
 
         return _response(200, {
             "scan_id": scan_id,
