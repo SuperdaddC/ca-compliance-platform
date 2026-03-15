@@ -450,7 +450,12 @@ def lambda_handler(event, context):
 
         scan_id = body.get("scan_id")
         url = body.get("url", "").strip()
-        profession = body.get("profession", "realestate")
+        raw_profession = body.get("profession", "realestate")
+        # Normalize frontend values → DB/rule-engine values
+        profession = {
+            "real_estate": "realestate",
+            "mortgage": "lending",
+        }.get(raw_profession, raw_profession)
         email = body.get("email", "").strip() or None
 
         if not url:
