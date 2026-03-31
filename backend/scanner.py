@@ -17,6 +17,9 @@ from enum import Enum
 from typing import Optional
 from dataclasses import dataclass, asdict
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
