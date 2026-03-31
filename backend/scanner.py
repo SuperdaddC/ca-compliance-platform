@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -210,7 +210,7 @@ async def update_scan_status(scan_id: str, status: str, result: dict = None, err
 # ---------------------------------------------------------------------------
 # Web scraper  (Playwright)
 # ---------------------------------------------------------------------------
-def scrape_website(url: str) -> dict:
+async def scrape_website(url: str) -> dict:
     """
     Returns dict with keys: text, html, head, screenshot_b64, page_count
     Raises classified exceptions on failure.
@@ -218,31 +218,31 @@ def scrape_website(url: str) -> dict:
     if not url.startswith("http"):
         url = f"https://{url}"
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
-        context = browser.new_context(
+        context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (compatible; ComplyWithJudy/2.0; +https://complywithjudy.com/bot)"
         )
         try:
-            page = context.new_page()
+            page = await context.new_page()
 
             # Navigate with a generous timeout; catch specific errors
             try:
-                page.goto(url, wait_until="networkidle", timeout=45000)
+                await page.goto(url, wait_until="networkidle", timeout=45000)
             except PlaywrightTimeout:
                 raise TimeoutError(f"timeout loading {url}")
 
             # Scroll to trigger lazy-loaded footer content (where disclosures often live)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1500)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1500)
 
-            inner_text = page.evaluate("() => document.body.innerText") or ""
-            raw_html   = page.evaluate("() => document.body.innerHTML") or ""
-            head_html  = page.evaluate("() => document.head ? document.head.innerHTML : ''") or ""
+            inner_text = await page.evaluate("() => document.body.innerText") or ""
+            raw_html   = await page.evaluate("() => document.body.innerHTML") or ""
+            head_html  = await page.evaluate("() => document.head ? document.head.innerHTML : ''") or ""
 
             # Strip tags, collapse whitespace
             def strip(h): return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', h)).strip()
@@ -255,10 +255,11 @@ def scrape_website(url: str) -> dict:
                 raise ValueError("empty_page: page rendered with no content")
 
             # Screenshot for verification feature
-            screenshot_b64 = page.screenshot(type="jpeg", quality=70, full_page=False).hex()
+            screenshot_bytes = await page.screenshot(type="jpeg", quality=70, full_page=False)
+            screenshot_b64 = screenshot_bytes.hex()
 
             # Count pages linked (basic multi-page signal)
-            links = page.evaluate(
+            links = await page.evaluate(
                 "() => [...new Set([...document.querySelectorAll('a[href]')].map(a=>a.href).filter(h=>h.startsWith(window.location.origin)))].length"
             )
 
@@ -271,7 +272,7 @@ def scrape_website(url: str) -> dict:
             }
 
         finally:
-            browser.close()
+            await browser.close()
 
 # ---------------------------------------------------------------------------
 # Compliance rule engine  (deterministic — no LLM needed for these)
@@ -557,7 +558,7 @@ async def scan(req: ScanRequest, request: Request):
 
     t0 = time.time()
     try:
-        scraped = scrape_website(url)
+        scraped = await scrape_website(url)
         text = scraped["text"]
         html = scraped["raw_html"]
 
