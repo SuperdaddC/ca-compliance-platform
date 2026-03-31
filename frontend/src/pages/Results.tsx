@@ -4,7 +4,7 @@ import Navbar from '../components/Navbar'
 import ScoreCircle from '../components/ScoreCircle'
 import CheckResult from '../components/CheckResult'
 import { useAuth } from '../App'
-import { getScanResult, retryScan, requestPdfReport, createCheckout } from '../lib/api'
+import { getScanResult, retryScan, createCheckout } from '../lib/api'
 import type { ScanResult as ScanResultType } from '../lib/api'
 
 type ScanStatus = 'loading' | 'running' | 'complete' | 'error'
@@ -76,7 +76,6 @@ export default function Results() {
   const [scan, setScan] = useState<ScanData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [errorType, setErrorType] = useState<string | undefined>()
-  const [downloadingPdf, setDownloadingPdf] = useState(false)
   const [retrying, setRetrying] = useState(false)
   const [pollCount, setPollCount] = useState(0)
   const [paymentSuccess, setPaymentSuccess] = useState(false)
@@ -177,16 +176,8 @@ export default function Results() {
     }
   }
 
-  async function handleDownloadPdf() {
-    if (!scanId) return
-    setDownloadingPdf(true)
-    try {
-      await requestPdfReport(scanId)
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'PDF generation failed. Please try again.')
-    } finally {
-      setDownloadingPdf(false)
-    }
+  function handleDownloadPdf() {
+    window.print()
   }
 
   async function handleCheckout(plan: 'single' | 'starter' | 'professional' | 'broker') {
@@ -359,13 +350,12 @@ export default function Results() {
                 {userIsPaid ? (
                   <button
                     onClick={handleDownloadPdf}
-                    disabled={downloadingPdf}
-                    className="flex items-center gap-2 bg-brand-blue text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-blue-900 transition-colors disabled:opacity-60"
+                    className="flex items-center gap-2 bg-brand-blue text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-blue-900 transition-colors"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
-                    {downloadingPdf ? 'Generating PDF…' : 'Download PDF Report'}
+                    Print / Save as PDF
                   </button>
                 ) : (
                   <button
