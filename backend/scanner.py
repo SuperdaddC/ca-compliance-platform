@@ -12,6 +12,7 @@ import hashlib
 import os
 import time
 import logging
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -574,7 +575,7 @@ async def scan(req: ScanRequest, request: Request):
         is_free = reason == "free"
 
         response = {
-            "scan_id": scan_id or hashlib.sha256(f"{url}:{time.time()}".encode()).hexdigest()[:12],
+            "scan_id": scan_id or str(uuid.uuid4()),
             "score": score,
             "url": scraped["url_final"],
             "profession": req.profession,
