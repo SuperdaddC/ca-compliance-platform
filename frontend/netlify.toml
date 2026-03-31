@@ -1,6 +1,7 @@
 [build]
-  publish = "frontend"
-  command = "echo 'Static site - no build needed'"
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
 
 [build.environment]
   NODE_VERSION = "18"
@@ -10,7 +11,7 @@
 
 [[redirects]]
   from = "/api/*"
-  to = "https://your-api-gateway-url.execute-api.us-west-2.amazonaws.com/prod/:splat"
+  to = "https://scanner.complywithjudy.com/:splat"
   status = 200
 
 [[headers]]
