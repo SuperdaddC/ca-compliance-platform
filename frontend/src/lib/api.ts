@@ -1,6 +1,7 @@
 import { supabase } from './supabase'
 
-const API_URL = import.meta.env.VITE_API_URL
+const SCANNER_URL = import.meta.env.VITE_SCANNER_URL || 'https://brvhtwhiy5.execute-api.us-west-2.amazonaws.com/dev'
+const STRIPE_FN = import.meta.env.VITE_STRIPE_FUNCTION_URL || '/.netlify/functions/stripe'
 
 async function getAuthHeaders(): Promise<HeadersInit> {
   const { data: { session } } = await supabase.auth.getSession()
@@ -11,81 +12,97 @@ async function getAuthHeaders(): Promise<HeadersInit> {
   return headers
 }
 
-export interface StartScanPayload {
+// ----------------------------------------------------------------
+// Types
+// ----------------------------------------------------------------
+export interface ScanRequest {
   url: string
-  profession: 'real_estate' | 'mortgage'
-  email?: string
+  email: string
+  profession: 'realestate' | 'lending'
+  scan_id?: string
+  user_id?: string
 }
 
-export interface StartScanResponse {
+export interface ScanResult {
   scan_id: string
-  status: string
-  score?: number
-  summary?: Record<string, number>
-  checks?: RawCheck[]
-  error?: string
+  score: number
+  url: string
+  profession: string
+  elapsed_seconds: number
+  is_free_scan: boolean
+  status: 'completed' | 'failed' | 'running' | 'pending'
+  plan?: string
+  error_type?: string
+  error_message?: string
+  checks: CheckResult[]
 }
 
-export interface RawCheck {
-  rule_id: string
-  rule_name: string
-  status: 'pass' | 'warning' | 'fail'
-  message: string
-  remediation: string | null
-  evidence: string | null
-  screenshot_required: boolean
+export interface CheckResult {
+  id: string
+  name: string
+  status: 'pass' | 'fail' | 'warn' | 'skip'
+  description: string
+  detail?: string
+  source_url?: string
+  fix?: string | null
 }
 
-// Transform raw Lambda check into the shape Results.tsx expects
-function transformCheck(c: RawCheck, index: number) {
-  return {
-    id: c.rule_id || String(index),
-    label: c.rule_name,
-    category: getCategoryForRule(c.rule_id),
-    status: c.status === 'warning' ? 'warn' : c.status,  // normalize 'warning' -> 'warn'
-    detail: c.message,
-    remediation: c.remediation ?? undefined,
-    evidence: c.evidence ?? undefined,
-    screenshot_required: c.screenshot_required,
-    screenshot_url: undefined,
-  }
-}
+export type PlanKey = 'starter' | 'professional' | 'broker' | 'single'
 
-function getCategoryForRule(ruleId: string): string {
-  const map: Record<string, string> = {
-    R01: 'License Disclosure',
-    R02: 'License Disclosure',
-    R03: 'License Disclosure',
-    R04: 'Federal Regulations',
-    R05: 'California State Law',
-    R06: 'Privacy Compliance',
-    R07: 'DFPI Requirements',
-    R08: 'Fair Housing',
-    R09: 'Advertising Rules',
-    R10: 'Advertising Rules',
-  }
-  return map[ruleId] || 'General'
-}
-
-export async function startScan(payload: StartScanPayload): Promise<StartScanResponse> {
+// ----------------------------------------------------------------
+// Core scan
+// ----------------------------------------------------------------
+export async function scanWebsite(req: ScanRequest): Promise<ScanResult> {
   const headers = await getAuthHeaders()
-  const res = await fetch(`${API_URL}/scan`, {
+  const res = await fetch(`${SCANNER_URL}/scan`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(payload),
+    body: JSON.stringify(req),
   })
 
-  const data = await res.json().catch(() => ({}))
-
-  if (!res.ok || data.error) {
-    throw new Error(data.error || data.message || 'Failed to start scan.')
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    const error = Object.assign(new Error('Scan failed'), { response: { status: res.status, data: err } })
+    throw error
   }
+
+  const data = await res.json()
+
+  // Capture email lead in background (non-blocking)
+  captureEmailLead(req.email, 'scan').catch(() => {})
 
   return data
 }
 
+// ----------------------------------------------------------------
+// Retry a failed scan
+// ----------------------------------------------------------------
+export async function retryScan(scanId: string): Promise<ScanResult> {
+  const headers = await getAuthHeaders()
+  const res = await fetch(`${SCANNER_URL}/scan/retry/${scanId}`, {
+    method: 'POST',
+    headers,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw Object.assign(new Error('Retry failed'), { response: { status: res.status, data: err } })
+  }
+  return res.json()
+}
+
+// ----------------------------------------------------------------
+// Get scan result by ID (for direct link / email click)
+// ----------------------------------------------------------------
+export async function getScanResult(scanId: string): Promise<ScanResult> {
+  const res = await fetch(`${SCANNER_URL}/scan/${scanId}`)
+  if (!res.ok) throw new Error('Result not found')
+  return res.json()
+}
+
+// ----------------------------------------------------------------
+// Legacy: read scan from Supabase (used by Report.tsx)
+// ----------------------------------------------------------------
 export async function getScanResults(scanId: string) {
-  // Read directly from Supabase — results are already stored there by Lambda
   const { data, error } = await supabase
     .from('scans')
     .select('*')
@@ -96,17 +113,22 @@ export async function getScanResults(scanId: string) {
     throw new Error(error?.message || 'Scan not found.')
   }
 
-  // Normalize status: 'completed' -> 'complete'
   const status = data.status === 'completed' ? 'complete'
     : data.status === 'failed' ? 'error'
     : data.status
 
-  // Extract checks from results JSON (Lambda stores as {checks: [...], score: N, ...})
-  const rawResults = data.results
-  let checks: ReturnType<typeof transformCheck>[] = []
+  const rawResults = data.results ?? data.result
+  let checks: { id: string; label: string; category: string; status: string; detail: string; remediation?: string }[] = []
 
   if (rawResults?.checks && Array.isArray(rawResults.checks)) {
-    checks = rawResults.checks.map((c: RawCheck, i: number) => transformCheck(c, i))
+    checks = rawResults.checks.map((c: CheckResult, i: number) => ({
+      id: c.id || String(i),
+      label: c.name,
+      category: 'General',
+      status: c.status === 'skip' ? 'na' : c.status,
+      detail: c.description,
+      remediation: c.fix ?? undefined,
+    }))
   }
 
   return {
@@ -117,26 +139,14 @@ export async function getScanResults(scanId: string) {
     score: data.score ?? rawResults?.score ?? 0,
     results: checks,
     created_at: data.created_at,
-    tier: (data.tier ?? 'free') as 'free' | 'single' | 'fix_verify' | 'pro' | 'broker',
+    tier: (data.tier ?? 'free') as string,
     summary: data.summary || rawResults?.summary,
   }
 }
 
-export async function getScanStatus(scanId: string): Promise<{ status: string; scan_id: string }> {
-  const { data, error } = await supabase
-    .from('scans')
-    .select('id, status')
-    .eq('id', scanId)
-    .single()
-
-  if (error || !data) throw new Error('Failed to fetch scan status.')
-
-  return {
-    scan_id: data.id,
-    status: data.status === 'completed' ? 'complete' : data.status,
-  }
-}
-
+// ----------------------------------------------------------------
+// Screenshot upload (kept for CheckResult component)
+// ----------------------------------------------------------------
 export async function uploadScreenshot(scanId: string, checkId: string, file: File) {
   const { data: { session } } = await supabase.auth.getSession()
   const formData = new FormData()
@@ -148,7 +158,7 @@ export async function uploadScreenshot(scanId: string, checkId: string, file: Fi
     headers['Authorization'] = `Bearer ${session.access_token}`
   }
 
-  const res = await fetch(`${API_URL}/scan/${scanId}/screenshot`, {
+  const res = await fetch(`${SCANNER_URL}/scan/${scanId}/screenshot`, {
     method: 'POST',
     headers,
     body: formData,
@@ -157,10 +167,84 @@ export async function uploadScreenshot(scanId: string, checkId: string, file: Fi
   return res.json()
 }
 
+// ----------------------------------------------------------------
+// PDF report (opens print-friendly page)
+// ----------------------------------------------------------------
 export async function requestPdfReport(scanId: string): Promise<{ url: string }> {
-  // Opens a print-friendly report page in a new tab.
-  // User can Cmd+P / Ctrl+P to save as PDF.
   const url = `/report/${scanId}`
   window.open(url, '_blank')
   return { url }
 }
+
+// ----------------------------------------------------------------
+// Stripe checkout
+// ----------------------------------------------------------------
+export async function createCheckout(params: {
+  plan: PlanKey
+  email?: string
+  userId?: string
+  scanId?: string
+}): Promise<string> {
+  const res = await fetch(`${STRIPE_FN}/create-checkout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...params,
+      successUrl: `${window.location.origin}/checkout/success`,
+      cancelUrl: `${window.location.origin}/#pricing`,
+    }),
+  })
+
+  if (!res.ok) throw new Error('Could not start checkout')
+  const { url } = await res.json()
+  return url
+}
+
+// ----------------------------------------------------------------
+// Email lead capture
+// ----------------------------------------------------------------
+export async function captureEmailLead(email: string, source: string = 'scan'): Promise<void> {
+  await fetch(`${STRIPE_FN}/capture-lead`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, source }),
+  })
+}
+
+// ----------------------------------------------------------------
+// Pricing catalogue (client-side reference)
+// ----------------------------------------------------------------
+export const PLANS = {
+  starter: {
+    name: 'Starter',
+    price: '$29',
+    period: '/year',
+    scans: '5 scans',
+    description: 'Perfect for solo agents — annual compliance check',
+    highlight: false,
+  },
+  professional: {
+    name: 'Professional',
+    price: '$79',
+    period: '/year',
+    scans: '25 scans',
+    description: 'Active agents & team leads who update their sites regularly',
+    highlight: true,
+  },
+  broker: {
+    name: 'Broker / Team',
+    price: '$199',
+    period: '/year',
+    scans: 'Unlimited · 10 domains',
+    description: 'Brokerages managing multiple agents and websites',
+    highlight: false,
+  },
+  single: {
+    name: 'Single Scan',
+    price: '$19',
+    period: 'one time',
+    scans: '1 scan with full fix report',
+    description: 'Try it before you subscribe',
+    highlight: false,
+  },
+} satisfies Record<PlanKey, object>

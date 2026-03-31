@@ -20,7 +20,7 @@ export interface Scan {
   id: string
   user_id: string | null
   url: string
-  profession: 'real_estate' | 'mortgage'
+  profession: 'realestate' | 'lending'
   status: 'pending' | 'running' | 'complete' | 'error'
   score: number | null
   results: ScanResult[] | null

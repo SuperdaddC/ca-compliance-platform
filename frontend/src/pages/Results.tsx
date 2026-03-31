@@ -1,12 +1,11 @@
 import { useEffect, useState, useRef } from 'react'
-import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useParams, Link, useNavigate, useSearchParams, useLocation } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import ScoreCircle from '../components/ScoreCircle'
 import CheckResult from '../components/CheckResult'
 import { useAuth } from '../App'
-import { getScanResults, requestPdfReport } from '../lib/api'
-import type { ScanResult } from '../lib/supabase'
-import { PRICE_IDS, startCheckout } from '../lib/stripe'
+import { getScanResult, retryScan, requestPdfReport, createCheckout } from '../lib/api'
+import type { ScanResult as ScanResultType } from '../lib/api'
 
 type ScanStatus = 'loading' | 'running' | 'complete' | 'error'
 
@@ -16,26 +15,69 @@ interface ScanData {
   profession: string
   status: string
   score: number
-  results: ScanResult[]
+  results: {
+    id: string
+    label: string
+    category: string
+    status: 'pass' | 'warn' | 'fail' | 'na'
+    detail: string
+    remediation?: string
+    screenshot_url?: string
+  }[]
   created_at: string
-  tier?: 'free' | 'single' | 'pro' | 'broker'
-  profession_override?: string
+  plan?: string
+  error_type?: string
+  error_message?: string
 }
 
-function isPaid(tier: string | undefined): boolean {
-  return tier === 'single' || tier === 'pro' || tier === 'broker'
+function isPaid(plan: string | undefined): boolean {
+  return plan === 'starter' || plan === 'professional' || plan === 'broker' || plan === 'single'
+}
+
+function transformResult(raw: ScanResultType): ScanData {
+  return {
+    id: raw.scan_id,
+    url: raw.url,
+    profession: raw.profession,
+    status: raw.status === 'completed' ? 'complete' : raw.status === 'failed' ? 'error' : raw.status,
+    score: raw.score,
+    results: (raw.checks ?? []).map((c) => ({
+      id: c.id,
+      label: c.name,
+      category: 'General',
+      status: c.status === 'skip' ? 'na' as const : c.status,
+      detail: c.description,
+      remediation: c.fix ?? undefined,
+    })),
+    created_at: new Date().toISOString(),
+    plan: raw.plan ?? (raw.is_free_scan ? undefined : 'single'),
+    error_type: raw.error_type,
+    error_message: raw.error_message,
+  }
+}
+
+const ERROR_LABELS: Record<string, string> = {
+  timeout: '⏱ The website took too long to respond',
+  blocked: '🚧 The website blocked the scan',
+  dns_fail: '🔍 Domain not found',
+  ssl_error: '🔒 SSL certificate issue',
+  empty_page: '📄 Page rendered empty',
+  rate_limited: '⏳ Temporarily rate-limited',
 }
 
 export default function Results() {
   const { scanId } = useParams<{ scanId: string }>()
   const [searchParams] = useSearchParams()
+  const location = useLocation()
   const { user } = useAuth()
   const navigate = useNavigate()
 
   const [status, setStatus] = useState<ScanStatus>('loading')
   const [scan, setScan] = useState<ScanData | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [errorType, setErrorType] = useState<string | undefined>()
   const [downloadingPdf, setDownloadingPdf] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const [pollCount, setPollCount] = useState(0)
   const [paymentSuccess, setPaymentSuccess] = useState(false)
   const paymentPollRef = useRef(0)
@@ -45,16 +87,27 @@ export default function Results() {
       navigate('/')
       return
     }
-    // Detect Stripe success redirect
     if (searchParams.get('payment') === 'success') {
       setPaymentSuccess(true)
     }
-    fetchResults()
+
+    // If navigated from Scan page with result in state, use it directly
+    const navState = location.state as { result?: ScanResultType } | null
+    if (navState?.result) {
+      const data = transformResult(navState.result)
+      setScan(data)
+      setStatus(data.status === 'complete' ? 'complete' : data.status === 'error' ? 'error' : 'running')
+      if (data.status === 'error') {
+        setError(data.error_message ?? 'Scan failed.')
+        setErrorType(data.error_type)
+      }
+    } else {
+      fetchResults()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanId])
 
   useEffect(() => {
-    // Poll if scan is still running
     if (status === 'running' && pollCount < 30) {
       const timer = setTimeout(() => {
         setPollCount((c) => c + 1)
@@ -66,14 +119,13 @@ export default function Results() {
       setError('Scan is taking longer than expected. Please refresh to check again.')
       setStatus('error')
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, pollCount])
 
-  // After payment success, keep re-fetching until tier is upgraded (webhook may take 2-5s)
   useEffect(() => {
     if (!paymentSuccess || !scan) return
-    if (isPaid(scan.tier)) return  // already upgraded, stop
-    if (paymentPollRef.current >= 10) return  // gave up after ~20s
+    if (isPaid(scan.plan)) return
+    if (paymentPollRef.current >= 10) return
 
     const timer = setTimeout(async () => {
       paymentPollRef.current += 1
@@ -86,12 +138,15 @@ export default function Results() {
   async function fetchResults() {
     if (!scanId) return
     try {
-      const data = await getScanResults(scanId) as ScanData
+      const raw = await getScanResult(scanId)
+      const data = transformResult(raw)
       if (data.status === 'complete') {
         setScan(data)
         setStatus('complete')
       } else if (data.status === 'error') {
-        setError('Scan encountered an error. Please try again.')
+        setScan(data)
+        setError(data.error_message ?? 'Scan encountered an error.')
+        setErrorType(data.error_type)
         setStatus('error')
       } else {
         setScan(data)
@@ -103,16 +158,48 @@ export default function Results() {
     }
   }
 
+  async function handleRetry() {
+    if (!scanId) return
+    setRetrying(true)
+    setError(null)
+    setErrorType(undefined)
+    try {
+      const raw = await retryScan(scanId)
+      const data = transformResult(raw)
+      setScan(data)
+      setStatus(data.status === 'complete' ? 'complete' : data.status === 'error' ? 'error' : 'running')
+      setPollCount(0)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Retry failed. Please try again.')
+      setStatus('error')
+    } finally {
+      setRetrying(false)
+    }
+  }
+
   async function handleDownloadPdf() {
     if (!scanId) return
     setDownloadingPdf(true)
     try {
-      const { url } = await requestPdfReport(scanId)
-      window.open(url, '_blank')
+      await requestPdfReport(scanId)
     } catch (err) {
       alert(err instanceof Error ? err.message : 'PDF generation failed. Please try again.')
     } finally {
       setDownloadingPdf(false)
+    }
+  }
+
+  async function handleCheckout(plan: 'single' | 'starter' | 'professional' | 'broker') {
+    try {
+      const url = await createCheckout({
+        plan,
+        email: user?.email,
+        userId: user?.id,
+        scanId,
+      })
+      window.location.href = url
+    } catch {
+      alert('Could not start checkout. Please try again.')
     }
   }
 
@@ -151,6 +238,7 @@ export default function Results() {
     )
   }
 
+  // Error state with retry
   if (status === 'error' || !scan) {
     return (
       <div className="min-h-screen bg-gray-50">
@@ -161,23 +249,43 @@ export default function Results() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </div>
-          <h2 className="text-xl font-bold text-gray-900 mb-2">Something went wrong</h2>
+          <h2 className="text-xl font-bold text-gray-900 mb-2">
+            {errorType ? (ERROR_LABELS[errorType] ?? 'Scan failed') : 'Something went wrong'}
+          </h2>
           <p className="text-gray-500 mb-6 max-w-sm">{error ?? 'Unable to load scan results.'}</p>
-          <Link to="/scan" className="btn-primary">Try Another Scan</Link>
+          <div className="flex gap-3">
+            {scanId && (
+              <button
+                onClick={handleRetry}
+                disabled={retrying}
+                className="flex items-center gap-2 bg-brand-gold hover:bg-brand-gold-dark text-white font-semibold px-5 py-2.5 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {retrying ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Retrying…
+                  </>
+                ) : (
+                  'Retry Scan'
+                )}
+              </button>
+            )}
+            <Link to="/scan" className="border border-gray-300 text-gray-700 font-semibold px-5 py-2.5 rounded-lg hover:bg-gray-50 transition-colors">
+              Try Another URL
+            </Link>
+          </div>
         </div>
       </div>
     )
   }
 
-  // Filter out N/A checks (not applicable for this profession) before rendering
   const results = (scan.results ?? []).filter((r) => r.status !== 'na')
   const passed = results.filter((r) => r.status === 'pass').length
   const warnings = results.filter((r) => r.status === 'warn').length
   const failed = results.filter((r) => r.status === 'fail').length
-  const userIsPaid = isPaid(scan.tier)
+  const userIsPaid = isPaid(scan.plan)
   const isOnFreeTier = !userIsPaid
 
-  // Group by category
   const categories = Array.from(new Set(results.map((r) => r.category))).sort()
 
   return (
@@ -197,15 +305,15 @@ export default function Results() {
             Compliance Report
           </h1>
           <p className="text-gray-500 text-sm mt-1">
-            {scan.profession === 'mortgage' ? 'Mortgage Loan Officer' : 'Real Estate Agent/Broker'} •{' '}
+            {scan.profession === 'lending' ? 'Mortgage Loan Officer' : 'Real Estate Agent/Broker'} •{' '}
             {new Date(scan.created_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
           </p>
         </div>
 
         {/* Payment success banner */}
         {paymentSuccess && (
-          <div className={`rounded-xl p-4 mb-6 flex items-center gap-3 ${isPaid(scan.tier) ? 'bg-green-50 border border-green-200' : 'bg-blue-50 border border-blue-200'}`}>
-            {isPaid(scan.tier) ? (
+          <div className={`rounded-xl p-4 mb-6 flex items-center gap-3 ${isPaid(scan.plan) ? 'bg-green-50 border border-green-200' : 'bg-blue-50 border border-blue-200'}`}>
+            {isPaid(scan.plan) ? (
               <>
                 <svg className="w-5 h-5 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
@@ -261,7 +369,7 @@ export default function Results() {
                   </button>
                 ) : (
                   <button
-                    onClick={() => startCheckout(PRICE_IDS.SINGLE_SCAN, scanId)}
+                    onClick={() => handleCheckout('single')}
                     className="flex items-center gap-2 bg-gray-100 text-gray-500 text-sm font-semibold px-4 py-2 rounded-lg hover:bg-gray-200 transition-colors"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -296,24 +404,12 @@ export default function Results() {
                 </p>
               </div>
               <button
-                onClick={() => startCheckout(PRICE_IDS.SINGLE_SCAN, scanId)}
+                onClick={() => handleCheckout('single')}
                 className="flex-shrink-0 bg-brand-gold hover:bg-brand-gold-dark text-white font-bold px-6 py-3 rounded-xl transition-colors shadow"
               >
                 Get Fix Instructions — $19
               </button>
             </div>
-          </div>
-        )}
-
-        {/* Profession Override Notice */}
-        {scan.profession_override && (
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 flex gap-3">
-            <svg className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <p className="text-sm text-blue-800">
-              <span className="font-semibold">Profession auto-detected:</span> {scan.profession_override}
-            </p>
           </div>
         )}
 
@@ -361,20 +457,20 @@ export default function Results() {
             <p className="text-gray-600 font-medium mb-1">Want to fix this permanently?</p>
             <p className="text-sm text-gray-500 mb-5">
               Single scan gives you the full fix guide for this report.
-              Pro gives you unlimited scans as you make updates.
+              Starter gives you 5 scans per year as you make updates.
             </p>
             <div className="flex flex-col sm:flex-row gap-3 justify-center">
               <button
-                onClick={() => startCheckout(PRICE_IDS.SINGLE_SCAN, scanId)}
+                onClick={() => handleCheckout('single')}
                 className="bg-brand-gold hover:bg-brand-gold-dark text-white font-bold px-6 py-3 rounded-xl transition-colors"
               >
                 Get This Report — $19
               </button>
               <button
-                onClick={() => startCheckout(PRICE_IDS.PRO_MONTHLY)}
+                onClick={() => handleCheckout('starter')}
                 className="bg-brand-blue hover:bg-blue-900 text-white font-bold px-6 py-3 rounded-xl transition-colors"
               >
-                Go Pro — $39/mo
+                Go Starter — $29/year
               </button>
             </div>
             {!user && (

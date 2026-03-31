@@ -7,6 +7,7 @@ import Landing from './pages/Landing'
 import Scan from './pages/Scan'
 import Results from './pages/Results'
 import Report from './pages/Report'
+import Checks from './pages/Checks'
 import Dashboard from './pages/Dashboard'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
@@ -86,6 +87,7 @@ export default function App() {
           <Route path="/" element={<Landing />} />
           <Route path="/scan" element={<Scan />} />
           <Route path="/results/:scanId" element={<Results />} />
+          <Route path="/checks" element={<Checks />} />
           <Route path="/report/:scanId" element={<Report />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />

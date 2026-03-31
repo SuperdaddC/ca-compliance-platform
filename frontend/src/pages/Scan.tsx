@@ -1,9 +1,16 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
-import { startScan } from '../lib/api'
+import { useAuth } from '../App'
+import { scanWebsite } from '../lib/api'
 
-type Profession = 'real_estate' | 'mortgage'
+type Profession = 'realestate' | 'lending'
+
+const SOCIAL_PROOF = [
+  { stat: '20+', label: 'scans run' },
+  { stat: '40+', label: 'checks performed' },
+  { stat: '28 yrs', label: 'DRE experience behind every rule' },
+]
 
 const PROGRESS_MESSAGES = [
   'Fetching your website…',
@@ -16,14 +23,22 @@ const PROGRESS_MESSAGES = [
   'Calculating your compliance score…',
 ]
 
+const ERROR_LABELS: Record<string, string> = {
+  timeout: '⏱ Site took too long',
+  blocked: '🚧 Site blocked the scan',
+  dns_fail: '🔍 Domain not found',
+  ssl_error: '🔒 SSL certificate issue',
+  limit_reached: '🔒 Free scan used',
+}
+
 export default function Scan() {
   const navigate = useNavigate()
+  const { user } = useAuth()
   const [url, setUrl] = useState('')
-  const [profession, setProfession] = useState<Profession>('real_estate')
   const [email, setEmail] = useState('')
-  const [emailResults, setEmailResults] = useState(false)
+  const [profession, setProfession] = useState<Profession>('realestate')
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ message: string; type?: string } | null>(null)
   const [progressIndex, setProgressIndex] = useState(0)
 
   function normalizeUrl(raw: string): string {
@@ -49,14 +64,14 @@ export default function Scan() {
     e.preventDefault()
     const urlError = validateUrl(url)
     if (urlError) {
-      setError(urlError)
+      setError({ message: urlError })
       return
     }
+    if (!email.trim()) return
 
     setLoading(true)
     setError(null)
 
-    // Start progress cycling
     let idx = 0
     const interval = setInterval(() => {
       idx = (idx + 1) % PROGRESS_MESSAGES.length
@@ -64,22 +79,35 @@ export default function Scan() {
     }, 2000)
 
     try {
-      const result = await startScan({
+      const result = await scanWebsite({
         url: normalizeUrl(url),
+        email: email.trim(),
         profession,
-        ...(emailResults && email.trim() ? { email: email.trim() } : {}),
+        ...(user ? { user_id: user.id } : {}),
       })
       clearInterval(interval)
-      if (result.error || result.status === 'failed') {
-        throw new Error(result.error || 'Scan failed. The site may be blocking automated access.')
-      }
-      navigate(`/results/${result.scan_id}`)
-    } catch (err) {
+      navigate(`/results/${result.scan_id}`, { state: { result } })
+    } catch (err: unknown) {
       clearInterval(interval)
-      setError(err instanceof Error ? err.message : 'Scan failed. Please try again.')
+      const e = err as { response?: { status?: number; data?: { detail?: { message?: string; error_type?: string } } } }
+      const detail = e?.response?.data?.detail
+      if (detail && typeof detail === 'object') {
+        setError({ message: detail.message ?? 'Scan failed.', type: detail.error_type })
+      } else if (e?.response?.status === 429) {
+        setError({
+          message: "You've already used your free scan from this device. Create an account or upgrade to run more scans.",
+          type: 'limit_reached',
+        })
+      } else {
+        setError({ message: 'Something went wrong. Please try again.' })
+      }
       setLoading(false)
     }
   }
+
+  const professionChecks = profession === 'realestate'
+    ? 'DRE license display, responsible broker, Equal Housing, AB 723 image disclosure, CCPA, team advertising rules'
+    : 'NMLS disclosure, TILA/Reg Z APR proximity, Equal Housing Lender, DFPI prohibited claims, CCPA'
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -88,13 +116,23 @@ export default function Scan() {
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-12 sm:py-16">
         {!loading ? (
           <>
-            <div className="text-center mb-10">
+            <div className="text-center mb-8">
               <h1 className="text-3xl font-bold text-gray-900 mb-2">
                 Scan your website
               </h1>
               <p className="text-gray-500">
-                Enter your website URL and we'll check it against California DRE and NMLS requirements.
+                Check your site against California DRE and NMLS requirements in under 60 seconds.
               </p>
+            </div>
+
+            {/* Social proof strip */}
+            <div className="flex justify-center gap-8 mb-8 flex-wrap">
+              {SOCIAL_PROOF.map(({ stat, label }) => (
+                <div key={label} className="text-center">
+                  <div className="text-xl font-bold text-brand-gold">{stat}</div>
+                  <div className="text-xs text-gray-500">{label}</div>
+                </div>
+              ))}
             </div>
 
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8">
@@ -121,13 +159,27 @@ export default function Scan() {
                       placeholder="yoursite.com"
                       className="w-full pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-brand-gold focus:border-transparent text-gray-900 placeholder-gray-400"
                       required
-                      disabled={loading}
                       autoFocus
                     />
                   </div>
-                  {error && (
-                    <p className="mt-2 text-sm text-red-600">{error}</p>
-                  )}
+                </div>
+
+                {/* Email Input (required) */}
+                <div>
+                  <label htmlFor="email" className="block text-sm font-semibold text-gray-700 mb-2">
+                    Email for your results
+                  </label>
+                  <input
+                    id="email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@yourbrokerage.com"
+                    className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-brand-gold focus:border-transparent text-gray-900 placeholder-gray-400"
+                    required
+                    autoComplete="email"
+                  />
+                  <p className="mt-1.5 text-xs text-gray-400">We'll email your results. No spam — ever.</p>
                 </div>
 
                 {/* Profession Selector */}
@@ -137,9 +189,9 @@ export default function Scan() {
                   </label>
                   <div className="grid grid-cols-2 gap-3">
                     {([
-                      { value: 'real_estate', label: 'Real Estate Agent / Broker', icon: '🏠' },
-                      { value: 'mortgage', label: 'Mortgage Loan Officer', icon: '📄' },
-                    ] as { value: Profession; label: string; icon: string }[]).map((opt) => (
+                      { value: 'realestate' as Profession, label: 'Real Estate Agent / Broker', icon: '🏠' },
+                      { value: 'lending' as Profession, label: 'Mortgage Loan Officer', icon: '📄' },
+                    ]).map((opt) => (
                       <button
                         key={opt.value}
                         type="button"
@@ -160,46 +212,33 @@ export default function Scan() {
                 {/* What's checked info */}
                 <div className="bg-brand-blue-light rounded-lg p-4 text-sm text-gray-600">
                   <p className="font-semibold text-brand-blue mb-1">
-                    {profession === 'real_estate' ? '🏠 DRE Compliance Checks' : '📄 DRE + NMLS Compliance Checks'}
+                    {profession === 'realestate' ? '🏠 DRE Compliance Checks' : '📄 DRE + NMLS Compliance Checks'}
                   </p>
-                  <p>
-                    {profession === 'real_estate'
-                      ? 'We check your DRE license display, Equal Housing compliance, team advertising rules, disclosure language, and more.'
-                      : 'We check DRE and NMLS license display, Equal Housing / Equal Opportunity lender logos, advertising regulations, and required disclosures.'
-                    }
-                  </p>
+                  <p>{professionChecks}</p>
                 </div>
 
-                {/* Email capture */}
-                <div>
-                  <label className="flex items-center gap-3 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={emailResults}
-                      onChange={(e) => setEmailResults(e.target.checked)}
-                      className="w-4 h-4 rounded border-gray-300 text-brand-gold focus:ring-brand-gold cursor-pointer"
-                    />
-                    <span className="text-sm font-medium text-gray-700">Email me my results</span>
-                  </label>
-                  {emailResults && (
-                    <div className="mt-3">
-                      <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="your@email.com"
-                        className="w-full px-4 py-2.5 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-brand-gold focus:border-transparent text-gray-900 placeholder-gray-400 text-sm"
-                        required={emailResults}
-                        autoComplete="email"
-                      />
-                      <p className="mt-1.5 text-xs text-gray-400">Free scan: score summary. Paid report: full PDF with fix instructions.</p>
-                    </div>
-                  )}
-                </div>
+                {/* Error display */}
+                {error && (
+                  <div className={`rounded-lg p-4 text-sm ${
+                    error.type === 'limit_reached'
+                      ? 'bg-amber-50 border border-amber-200 text-amber-900'
+                      : 'bg-red-50 border border-red-200 text-red-900'
+                  }`}>
+                    <p className="font-semibold mb-1">
+                      {ERROR_LABELS[error.type ?? ''] ?? '⚠️ Scan failed'}
+                    </p>
+                    <p>{error.message}</p>
+                    {error.type === 'limit_reached' && (
+                      <a href="/#pricing" className="inline-block mt-2 text-brand-gold font-semibold hover:underline">
+                        Upgrade from $29/year →
+                      </a>
+                    )}
+                  </div>
+                )}
 
                 <button
                   type="submit"
-                  disabled={loading || !url.trim() || (emailResults && !email.trim())}
+                  disabled={loading || !url.trim() || !email.trim()}
                   className="w-full flex items-center justify-center gap-2 bg-brand-gold hover:bg-brand-gold-dark text-white font-bold py-4 rounded-xl text-lg shadow transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Start Scan
@@ -209,9 +248,16 @@ export default function Scan() {
                 </button>
 
                 <p className="text-center text-xs text-gray-400">
-                  First scan is always free. No account required.
+                  First scan is always free. No credit card required.
                 </p>
               </form>
+            </div>
+
+            {/* Trust strip */}
+            <div className="text-center mt-6 text-xs text-gray-400 flex justify-center gap-6 flex-wrap">
+              <span>🏛️ DRE Broker #01842442</span>
+              <span>📋 NMLS #276626</span>
+              <span>🔒 Results never shared</span>
             </div>
           </>
         ) : (
@@ -243,7 +289,7 @@ export default function Scan() {
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Scanning</p>
               <p className="text-sm font-medium text-gray-700 truncate">{normalizeUrl(url)}</p>
               <p className="text-xs text-gray-400 mt-1">
-                {profession === 'real_estate' ? 'Real Estate Agent / Broker checks' : 'Mortgage Loan Officer checks'}
+                {profession === 'realestate' ? 'Real Estate Agent / Broker checks' : 'Mortgage Loan Officer checks'}
               </p>
             </div>
 
