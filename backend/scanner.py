@@ -46,8 +46,11 @@ app = FastAPI(title="ComplyWithJudy Scanner", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["POST", "OPTIONS"],
+    allow_origins=ALLOWED_ORIGINS + [
+        "https://www.complywithjudy.com",
+        "https://complywithjudy.netlify.app",
+    ],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -113,52 +116,66 @@ def make_fingerprint(ip: str, email: str) -> str:
     raw = f"{ip}:{email.lower().strip()}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
+ADMIN_EMAILS = {"mike@thecolyerteam.com"}
+
 async def check_scan_allowed(ip: str, email: str, user_id: Optional[str]) -> tuple[bool, str]:
     """
     Returns (allowed, reason).
     Rules:
+      - Admin emails: always allowed
       - Paid users: unlimited
       - Free/anon: 1 scan per IP+email fingerprint ever
     """
+    if email.lower().strip() in ADMIN_EMAILS:
+        return True, "admin"
+
     if user_id:
-        # Check subscription via Supabase
-        async with httpx.AsyncClient() as client:
-            r = await client.get(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                params={"user_id": f"eq.{user_id}", "status": "eq.active", "select": "plan"}
-            )
-            subs = r.json()
-            if subs and subs[0].get("plan") in ("starter", "professional", "broker", "single"):
-                return True, "paid"
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                    params={"user_id": f"eq.{user_id}", "status": "eq.active", "select": "plan"}
+                )
+                subs = r.json()
+                if isinstance(subs, list) and subs and subs[0].get("plan") in ("starter", "professional", "broker", "single"):
+                    return True, "paid"
+        except Exception as e:
+            log.warning(f"Subscription check failed (table may not exist yet): {e}")
 
     # Free path: check fingerprint
     fp = make_fingerprint(ip, email)
-    async with httpx.AsyncClient() as client:
-        r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/scan_fingerprints",
-            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-            params={"fingerprint": f"eq.{fp}", "select": "id,used_at"}
-        )
-        existing = r.json()
-        if existing:
-            return False, "You've already used your free scan. Create an account or upgrade to run more scans."
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/scan_fingerprints",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                params={"fingerprint": f"eq.{fp}", "select": "id,used_at"}
+            )
+            existing = r.json()
+            if isinstance(existing, list) and existing:
+                return False, "You've already used your free scan. Create an account or upgrade to run more scans."
+    except Exception as e:
+        log.warning(f"Fingerprint check failed (table may not exist yet): {e}")
 
     return True, "free"
 
 async def record_fingerprint(ip: str, email: str, scan_id: str):
     fp = make_fingerprint(ip, email)
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{SUPABASE_URL}/rest/v1/scan_fingerprints",
-            headers={
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal"
-            },
-            json={"fingerprint": fp, "email": email, "scan_id": scan_id, "used_at": datetime.now(timezone.utc).isoformat()}
-        )
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/scan_fingerprints",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                },
+                json={"fingerprint": fp, "email": email, "scan_id": scan_id, "used_at": datetime.now(timezone.utc).isoformat()}
+            )
+    except Exception as e:
+        log.warning(f"Failed to record fingerprint (table may not exist yet): {e}")
 
 # ---------------------------------------------------------------------------
 # Supabase scan status helpers
@@ -174,18 +191,21 @@ async def update_scan_status(scan_id: str, status: str, result: dict = None, err
     if error_message:
         payload["error_message"] = error_message
 
-    async with httpx.AsyncClient() as client:
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/scans",
-            headers={
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal"
-            },
-            params={"id": f"eq.{scan_id}"},
-            json=payload
-        )
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/scans",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                },
+                params={"id": f"eq.{scan_id}"},
+                json=payload
+            )
+    except Exception as e:
+        log.warning(f"Failed to update scan status (table may not exist yet): {e}")
 
 # ---------------------------------------------------------------------------
 # Web scraper  (Playwright)
@@ -553,9 +573,12 @@ async def scan(req: ScanRequest, request: Request):
         is_free = reason == "free"
 
         response = {
+            "scan_id": scan_id or hashlib.sha256(f"{url}:{time.time()}".encode()).hexdigest()[:12],
             "score": score,
             "url": scraped["url_final"],
             "profession": req.profession,
+            "status": "completed",
+            "is_free_scan": (reason == "free"),
             "elapsed_seconds": elapsed,
             "screenshot_available": True,
             "checks": [
