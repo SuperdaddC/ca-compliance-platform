@@ -131,14 +131,44 @@ export default function CheckResult({ scanId, check, isPaidTier, onScreenshotUpl
 
       {isExpanded && (
         <div className="mt-4 ml-8 space-y-3">
-          {/* Regulation citation (always visible) */}
+          {/* Regulation citation — source link free, full text paid */}
           {check.regulation && (
             <div className="rounded-md bg-white border border-gray-200 p-3">
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
                 Regulation
               </p>
-              <p className="text-sm text-gray-700 italic">{check.regulation}</p>
-              {check.source_url && (
+              {isPaidTier ? (
+                <>
+                  <p className="text-sm text-gray-700 italic">{check.regulation}</p>
+                  {check.source_url && (
+                    <a
+                      href={check.source_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block text-xs text-brand-blue hover:text-brand-gold mt-1.5 font-medium"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      View source regulation →
+                    </a>
+                  )}
+                </>
+              ) : (
+                <div className="relative">
+                  <p className="text-sm text-gray-700 italic filter blur-sm select-none">
+                    {check.regulation}
+                  </p>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <a
+                      href="/#pricing"
+                      className="bg-brand-gold text-white text-xs font-semibold px-3 py-1.5 rounded-md shadow hover:bg-brand-gold-dark transition-colors"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      Upgrade to see regulation →
+                    </a>
+                  </div>
+                </div>
+              )}
+              {!isPaidTier && check.source_url && (
                 <a
                   href={check.source_url}
                   target="_blank"
