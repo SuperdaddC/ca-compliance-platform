@@ -230,7 +230,7 @@ export default function Scan() {
                     <p>{error.message}</p>
                     {error.type === 'limit_reached' && (
                       <a href="/#pricing" className="inline-block mt-2 text-brand-gold font-semibold hover:underline">
-                        Upgrade from $29/year →
+                        Upgrade from $29.99/year →
                       </a>
                     )}
                   </div>

@@ -18,6 +18,9 @@ export default function Navbar() {
           <Link to="/checks" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">
             Checks
           </Link>
+          <Link to="/#pricing" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">
+            Pricing
+          </Link>
           {user ? (
             <>
               <Link to="/dashboard" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">

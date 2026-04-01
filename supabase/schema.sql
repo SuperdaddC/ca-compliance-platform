@@ -180,4 +180,4 @@ create or replace view public.scan_summary as
 -- Single:        $19 once  — 1 scan
 
 comment on table public.user_subscriptions is
-  'Starter=$29/yr/5scans | Professional=$79/yr/25scans | Broker=$199/yr/unlimited | Single=$19/once';
+  'Starter=$29.99/yr/5scans | Professional=$79.99/yr/25scans | Broker=$199.99/yr/unlimited | Single=$19.99/once';
