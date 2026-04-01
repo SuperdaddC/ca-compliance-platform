@@ -40,6 +40,10 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "https://complywithjudy.com").split(",")
 
+# API keys for external integrations (Judy/OpenClaw, future partners)
+# Comma-separated list of valid keys. Set in .env: API_KEYS=key1,key2
+API_KEYS = set(filter(None, os.environ.get("API_KEYS", "").split(",")))
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -52,7 +56,7 @@ app.add_middleware(
         "https://complywithjudy.netlify.app",
     ],
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
 )
 
 # ---------------------------------------------------------------------------
@@ -1207,3 +1211,95 @@ async def retry_scan(scan_id: str, request: Request):
         ScanRequest(url=row["url"], profession=row["profession"], email=row.get("email",""), scan_id=scan_id, user_id=row.get("user_id")),
         request
     )
+
+
+# ---------------------------------------------------------------------------
+# Public API  (API key auth — for Judy/OpenClaw, external integrations)
+# ---------------------------------------------------------------------------
+class ApiScanRequest(BaseModel):
+    url: str
+    profession: str = "realestate"    # "realestate" | "lending"
+    email: Optional[str] = None       # optional — for sending results email
+
+def verify_api_key(request: Request):
+    """Check X-API-Key header against allowed keys."""
+    key = request.headers.get("X-API-Key", "")
+    if not API_KEYS:
+        raise HTTPException(status_code=503, detail="API keys not configured. Set API_KEYS env var on the scanner.")
+    if key not in API_KEYS:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key. Pass X-API-Key header.")
+
+@app.post("/api/scan")
+async def api_scan(req: ApiScanRequest, request: Request):
+    """
+    Public API scan endpoint — requires X-API-Key header.
+    Bypasses free scan limits. Returns full results with fix instructions.
+    """
+    verify_api_key(request)
+
+    url = req.url.strip()
+    if not url.startswith("http"):
+        url = f"https://{url}"
+
+    scan_id = str(uuid.uuid4())
+
+    # Create scan record
+    await create_scan_record(scan_id, url, req.profession, email=req.email, is_free=False)
+    await update_scan_status(scan_id, "running")
+
+    t0 = time.time()
+    try:
+        scraped = await scrape_website(url)
+        text = scraped["text"]
+        html = scraped["raw_html"]
+        eho_signals = scraped.get("eho_signals", [])
+
+        if req.profession == "lending":
+            rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
+        else:
+            rule_results = run_realestate_checks(text, html, eho_signals=eho_signals)
+
+        ai_check = await check_ai_crawler_blocking(scraped["url_final"])
+        rule_results.append(ai_check)
+
+        score = score_results(rule_results)
+        elapsed = round(time.time() - t0, 1)
+
+        response = {
+            "scan_id": scan_id,
+            "score": score,
+            "url": scraped["url_final"],
+            "profession": req.profession,
+            "status": "completed",
+            "is_free_scan": False,
+            "elapsed_seconds": elapsed,
+            "checks": [
+                {
+                    "id": r.id,
+                    "name": r.name,
+                    "status": r.status,
+                    "description": r.description,
+                    "detail": r.detail,
+                    "source_url": r.source_url,
+                    "fix": r.fix,
+                    "regulation": r.regulation,
+                    "webmaster_email": r.webmaster_email,
+                }
+                for r in rule_results
+            ]
+        }
+
+        await update_scan_status(scan_id, "completed", result=response)
+
+        # Send email if provided
+        if req.email:
+            await send_scan_email(req.email, scan_id, response, is_paid=True)
+
+        return response
+
+    except Exception as exc:
+        error_type = classify_error(exc)
+        error_msg = ERROR_MESSAGES[error_type]
+        log.error(f"API scan failed [{error_type}] {url}: {exc}")
+        await update_scan_status(scan_id, "failed", error_type=error_type.value, error_message=error_msg)
+        raise HTTPException(status_code=422, detail={"error_type": error_type.value, "message": error_msg})
