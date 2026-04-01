@@ -21,6 +21,8 @@ export interface ScanRequest {
   profession: 'realestate' | 'lending'
   scan_id?: string
   user_id?: string
+  courtesy_to?: string
+  courtesy_name?: string
 }
 
 export interface ScanResult {

@@ -6,6 +6,8 @@ import { scanWebsite } from '../lib/api'
 
 type Profession = 'realestate' | 'lending'
 
+const ADMIN_EMAILS = ['mike@thecolyerteam.com', 'mjcolyer@gmail.com']
+
 const SOCIAL_PROOF = [
   { stat: '20+', label: 'scans run' },
   { stat: '40+', label: 'checks performed' },
@@ -40,6 +42,12 @@ export default function Scan() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<{ message: string; type?: string } | null>(null)
   const [progressIndex, setProgressIndex] = useState(0)
+
+  // Courtesy scan (admin only)
+  const isAdmin = user?.email && ADMIN_EMAILS.includes(user.email.toLowerCase())
+  const [courtesyMode, setCourtesyMode] = useState(false)
+  const [courtesyEmail, setCourtesyEmail] = useState('')
+  const [courtesyName, setCourtesyName] = useState('')
 
   function normalizeUrl(raw: string): string {
     const trimmed = raw.trim()
@@ -84,6 +92,10 @@ export default function Scan() {
         email: email.trim(),
         profession,
         ...(user ? { user_id: user.id } : {}),
+        ...(courtesyMode && courtesyEmail.trim() ? {
+          courtesy_to: courtesyEmail.trim(),
+          courtesy_name: courtesyName.trim(),
+        } : {}),
       })
       clearInterval(interval)
       navigate(`/results/${result.scan_id}`, { state: { result } })
@@ -208,6 +220,56 @@ export default function Scan() {
                     ))}
                   </div>
                 </div>
+
+                {/* Courtesy scan toggle (admin only) */}
+                {isAdmin && (
+                  <div className="border border-indigo-200 bg-indigo-50 rounded-xl p-4">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={courtesyMode}
+                        onChange={(e) => setCourtesyMode(e.target.checked)}
+                        className="w-4 h-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <div>
+                        <span className="text-sm font-semibold text-indigo-900">Courtesy Scan</span>
+                        <p className="text-xs text-indigo-600 mt-0.5">Send a full report to a partner with a sign-up pitch</p>
+                      </div>
+                    </label>
+                    {courtesyMode && (
+                      <div className="mt-4 space-y-3 pl-7">
+                        <div>
+                          <label htmlFor="courtesyName" className="block text-xs font-semibold text-indigo-800 mb-1">
+                            Partner's name (optional)
+                          </label>
+                          <input
+                            id="courtesyName"
+                            type="text"
+                            value={courtesyName}
+                            onChange={(e) => setCourtesyName(e.target.value)}
+                            placeholder="Jane Smith"
+                            className="w-full px-3 py-2 rounded-lg border border-indigo-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 text-sm text-gray-900 placeholder-gray-400"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="courtesyEmail" className="block text-xs font-semibold text-indigo-800 mb-1">
+                            Send report to
+                          </label>
+                          <input
+                            id="courtesyEmail"
+                            type="email"
+                            value={courtesyEmail}
+                            onChange={(e) => setCourtesyEmail(e.target.value)}
+                            placeholder="partner@theirbrokerage.com"
+                            className="w-full px-3 py-2 rounded-lg border border-indigo-200 focus:outline-none focus:ring-2 focus:ring-indigo-400 text-sm text-gray-900 placeholder-gray-400"
+                            required={courtesyMode}
+                          />
+                          <p className="mt-1 text-xs text-indigo-500">They'll get the full report with fix instructions + a sign-up CTA</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* What's checked info */}
                 <div className="bg-brand-blue-light rounded-lg p-4 text-sm text-gray-600">

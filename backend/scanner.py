@@ -100,6 +100,8 @@ class ScanRequest(BaseModel):
     email: str               # required — captures for remarketing
     scan_id: Optional[str] = None   # Supabase scan row ID (for status updates)
     user_id: Optional[str] = None
+    courtesy_to: Optional[str] = None       # partner email — sends full report as courtesy
+    courtesy_name: Optional[str] = None     # partner's name (for personalization)
 
 class CheckResult(BaseModel):
     id: str
@@ -987,6 +989,50 @@ async def send_scan_email(email: str, scan_id: str, response: dict, is_paid: boo
         log.warning(f"Scan email error (non-fatal): {e}")
 
 
+async def send_courtesy_email(to_email: str, to_name: str, scan_id: str, response: dict):
+    """Send a courtesy compliance report to a partner realtor."""
+    try:
+        checks = response.get("checks", [])
+        passed = sum(1 for c in checks if c["status"] == "pass")
+        warnings = sum(1 for c in checks if c["status"] == "warn")
+        failed = sum(1 for c in checks if c["status"] == "fail")
+        total = sum(1 for c in checks if c["status"] != "skip")
+
+        payload = {
+            "to": to_email,
+            "toName": to_name or "",
+            "scanId": scan_id,
+            "url": response.get("url", ""),
+            "score": response.get("score", 0),
+            "profession": response.get("profession", "realestate"),
+            "passed": passed,
+            "warnings": warnings,
+            "failed": failed,
+            "totalChecks": total,
+            "checks": [
+                {
+                    "name": c["name"],
+                    "status": c["status"],
+                    "description": c["description"],
+                    "fix": c.get("fix") or "",
+                }
+                for c in checks if c["status"] != "skip"
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{EMAIL_FUNCTION_URL}/courtesy-scan",
+                json=payload,
+            )
+            if resp.status_code == 200:
+                log.info(f"Courtesy email sent to {to_email} for {scan_id}")
+            else:
+                log.warning(f"Courtesy email failed ({resp.status_code}): {resp.text}")
+    except Exception as e:
+        log.warning(f"Courtesy email error (non-fatal): {e}")
+
+
 # ---------------------------------------------------------------------------
 # Main scan endpoint
 # ---------------------------------------------------------------------------
@@ -1061,6 +1107,10 @@ async def scan(req: ScanRequest, request: Request):
 
         # Send email notification (fire-and-forget)
         await send_scan_email(req.email, response["scan_id"], response, is_paid=not is_free)
+
+        # Courtesy scan — send full report to partner (admin only)
+        if req.courtesy_to and req.email.lower().strip() in ADMIN_EMAILS:
+            await send_courtesy_email(req.courtesy_to, req.courtesy_name or "", response["scan_id"], response)
 
         return response
 
