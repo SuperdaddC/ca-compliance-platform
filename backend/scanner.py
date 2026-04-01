@@ -1218,8 +1218,8 @@ async def retry_scan(scan_id: str, request: Request):
 # ---------------------------------------------------------------------------
 class ApiScanRequest(BaseModel):
     url: str
-    profession: str = "realestate"    # "realestate" | "lending"
-    email: Optional[str] = None       # optional — for sending results email
+    profession: str              # "realestate" | "lending" — required, no default
+    email: Optional[str] = None  # optional — for sending results email
 
 def verify_api_key(request: Request):
     """Check X-API-Key header against allowed keys."""
