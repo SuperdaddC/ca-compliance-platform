@@ -28,7 +28,7 @@ const PLANS: Record<string, {
 }> = {
   starter: {
     name: 'Starter',
-    price: 2900,
+    price: 2999,
     interval: 'year',
     scans: 5,
     domains: 1,
@@ -36,7 +36,7 @@ const PLANS: Record<string, {
   },
   professional: {
     name: 'Professional',
-    price: 7900,
+    price: 7999,
     interval: 'year',
     scans: 25,
     domains: 1,
@@ -44,7 +44,7 @@ const PLANS: Record<string, {
   },
   broker: {
     name: 'Broker / Team',
-    price: 19900,
+    price: 19999,
     interval: 'year',
     scans: null,
     domains: 10,
@@ -52,7 +52,7 @@ const PLANS: Record<string, {
   },
   single: {
     name: 'Single Scan',
-    price: 1900,
+    price: 1999,
     interval: null,
     scans: 1,
     domains: 1,
@@ -100,7 +100,7 @@ async function handleCreateCheckout(body: {
       price: plan.stripe_price_id,
       quantity: 1,
     }],
-    success_url: `${body.successUrl}?session_id={CHECKOUT_SESSION_ID}&plan=${body.plan}`,
+    success_url: `${body.successUrl}?session_id={CHECKOUT_SESSION_ID}&plan=${body.plan}${body.scanId ? `&scan_id=${body.scanId}` : ''}`,
     cancel_url: body.cancelUrl,
     metadata: {
       plan: body.plan,

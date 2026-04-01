@@ -31,7 +31,7 @@ export default function Dashboard() {
       // Fetch scan history
       const { data: scanData } = await supabase
         .from('scans')
-        .select('id, url, profession, status, score, created_at, plan')
+        .select('id, url, profession, status, score, created_at')
         .eq('user_id', user!.id)
         .order('created_at', { ascending: false })
         .limit(50)
@@ -40,7 +40,7 @@ export default function Dashboard() {
 
       // Fetch subscription info
       const { data: subData } = await supabase
-        .from('subscriptions')
+        .from('user_subscriptions')
         .select('plan, scans_remaining, current_period_end')
         .eq('user_id', user!.id)
         .eq('status', 'active')
