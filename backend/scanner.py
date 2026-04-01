@@ -85,7 +85,7 @@ def classify_error(exc: Exception, stderr: str = "") -> ScanErrorType:
         return ScanErrorType.DNS_FAIL
     if "net::err_cert" in msg or "ssl" in msg or "certificate" in msg:
         return ScanErrorType.SSL_ERROR
-    if "403" in msg or "captcha" in msg or "forbidden" in msg:
+    if "403" in msg or "captcha" in msg or "forbidden" in msg or "blocked" in msg or "human verification" in msg:
         return ScanErrorType.BLOCKED
     if "rate" in msg and "limit" in msg:
         return ScanErrorType.RATE_LIMITED
@@ -243,6 +243,44 @@ async def scrape_website(url: str) -> dict:
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except PlaywrightTimeout:
                 log.info(f"networkidle timeout for {url} — proceeding with what loaded")
+
+            # Detect bot-challenge pages (Imperva, PerimeterX, DataDome, etc.)
+            # These serve a JS challenge or checkbox before the real site loads.
+            challenge_detected = False
+            page_text_check = (await page.evaluate("() => document.body.innerText") or "").lower()
+            challenge_signals = [
+                "i am not a robot",
+                "request rejected",
+                "checking your browser",
+                "verify you are human",
+                "please verify",
+                "just a moment",
+                "access denied",
+                "attention required",
+                "enable javascript and cookies",
+                "perimeterx",
+                "datadome",
+                "human verification",
+            ]
+            if any(sig in page_text_check for sig in challenge_signals) or len(page_text_check.strip()) < 200:
+                challenge_detected = True
+                log.info(f"Bot challenge detected for {url} — waiting for auto-resolve...")
+                # Many challenges auto-solve after JS runs; wait and check again
+                await page.wait_for_timeout(5000)
+                page_text_check = (await page.evaluate("() => document.body.innerText") or "").lower()
+                if any(sig in page_text_check for sig in challenge_signals) or len(page_text_check.strip()) < 200:
+                    # Still blocked — try clicking the checkbox if it exists
+                    try:
+                        checkbox = await page.query_selector('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA"], .g-recaptcha, #px-captcha, input[type="checkbox"]')
+                        if checkbox:
+                            await checkbox.click()
+                            await page.wait_for_timeout(5000)
+                    except Exception:
+                        pass
+                    # Final check
+                    page_text_check = (await page.evaluate("() => document.body.innerText") or "").lower()
+                    if any(sig in page_text_check[:500] for sig in challenge_signals[:4]) or len(page_text_check.strip()) < 200:
+                        raise ValueError(f"blocked: bot protection on {url} requires human verification (likely Imperva/PerimeterX)")
 
             # Scroll to trigger lazy-loaded footer content (where disclosures often live)
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
