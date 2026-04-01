@@ -6,8 +6,6 @@ import { scanWebsite } from '../lib/api'
 
 type Profession = 'realestate' | 'lending'
 
-const ADMIN_EMAILS = ['mike@thecolyerteam.com', 'mjcolyer@gmail.com']
-
 const SOCIAL_PROOF = [
   { stat: '20+', label: 'scans run' },
   { stat: '40+', label: 'checks performed' },
@@ -35,7 +33,7 @@ const ERROR_LABELS: Record<string, string> = {
 
 export default function Scan() {
   const navigate = useNavigate()
-  const { user } = useAuth()
+  const { user, role } = useAuth()
   const [url, setUrl] = useState('')
   const [email, setEmail] = useState('')
   const [profession, setProfession] = useState<Profession>('realestate')
@@ -44,7 +42,7 @@ export default function Scan() {
   const [progressIndex, setProgressIndex] = useState(0)
 
   // Courtesy scan (admin only)
-  const isAdmin = user?.email && ADMIN_EMAILS.includes(user.email.toLowerCase())
+  const isAdmin = role === 'admin'
   const [courtesyMode, setCourtesyMode] = useState(false)
   const [courtesyEmail, setCourtesyEmail] = useState('')
   const [courtesyName, setCourtesyName] = useState('')

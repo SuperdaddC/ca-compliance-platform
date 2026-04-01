@@ -18,6 +18,7 @@ interface AuthContextType {
   user: User | null
   session: Session | null
   loading: boolean
+  role: string | null
   signOut: () => Promise<void>
 }
 
@@ -25,6 +26,7 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   session: null,
   loading: true,
+  role: null,
   signOut: async () => {},
 })
 
@@ -35,18 +37,40 @@ export function useAuth() {
 function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [user, setUser] = useState<User | null>(null)
+  const [role, setRole] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+
+  async function loadRole(userId: string) {
+    try {
+      const { data } = await supabase
+        .from('user_profiles')
+        .select('role')
+        .eq('id', userId)
+        .single()
+      setRole(data?.role ?? 'user')
+    } catch {
+      setRole('user')
+    }
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       setUser(session?.user ?? null)
+      if (session?.user) {
+        loadRole(session.user.id)
+      }
       setLoading(false)
     })
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session)
       setUser(session?.user ?? null)
+      if (session?.user) {
+        loadRole(session.user.id)
+      } else {
+        setRole(null)
+      }
     })
 
     return () => subscription.unsubscribe()
@@ -56,10 +80,11 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     await supabase.auth.signOut()
     setSession(null)
     setUser(null)
+    setRole(null)
   }
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, signOut }}>
+    <AuthContext.Provider value={{ user, session, loading, role, signOut }}>
       {children}
     </AuthContext.Provider>
   )
