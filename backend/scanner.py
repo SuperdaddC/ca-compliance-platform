@@ -187,6 +187,8 @@ async def update_scan_status(scan_id: str, status: str, result: dict = None, err
     payload = {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}
     if result:
         payload["result"] = json.dumps(result)
+        if "score" in result:
+            payload["score"] = result["score"]
     if error_type:
         payload["error_type"] = error_type
     if error_message:
@@ -207,6 +209,40 @@ async def update_scan_status(scan_id: str, status: str, result: dict = None, err
             )
     except Exception as e:
         log.warning(f"Failed to update scan status (table may not exist yet): {e}")
+
+
+async def create_scan_record(scan_id: str, url: str, profession: str, email: str = None, user_id: str = None, is_free: bool = True):
+    """INSERT a new scan row into Supabase so the results page can find it."""
+    payload = {
+        "id": scan_id,
+        "url": url,
+        "profession": profession,
+        "status": "running",
+        "is_free_scan": is_free,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if email:
+        payload["email"] = email
+    if user_id:
+        payload["user_id"] = user_id
+
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/scans",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                },
+                json=payload
+            )
+        log.info(f"Created scan record {scan_id}")
+    except Exception as e:
+        log.warning(f"Failed to create scan record: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Web scraper  (Playwright)
@@ -935,7 +971,11 @@ async def scan(req: ScanRequest, request: Request):
     if not allowed:
         raise HTTPException(status_code=429, detail=reason)
 
-    scan_id = req.scan_id
+    scan_id = req.scan_id or str(uuid.uuid4())
+
+    # Create the scan record in Supabase so the results page can find it
+    is_free = (reason == "free")
+    await create_scan_record(scan_id, url, req.profession, email=req.email, user_id=req.user_id, is_free=is_free)
     await update_scan_status(scan_id, "running")
 
     t0 = time.time()
@@ -956,11 +996,8 @@ async def scan(req: ScanRequest, request: Request):
         score = score_results(rule_results)
         elapsed = round(time.time() - t0, 1)
 
-        # Strip fix instructions for free scans (gated by plan on frontend too)
-        is_free = reason == "free"
-
         response = {
-            "scan_id": scan_id or str(uuid.uuid4()),
+            "scan_id": scan_id,
             "score": score,
             "url": scraped["url_final"],
             "profession": req.profession,
@@ -1001,6 +1038,62 @@ async def scan(req: ScanRequest, request: Request):
         log.error(f"Scan failed [{error_type}] {url}: {exc}")
         await update_scan_status(scan_id, "failed", error_type=error_type.value, error_message=error_msg)
         raise HTTPException(status_code=422, detail={"error_type": error_type.value, "message": error_msg})
+
+
+# --- Get scan result by ID (for email "View Report" links) ---
+@app.get("/scan/{scan_id}")
+async def get_scan(scan_id: str):
+    """Return scan result by ID — used by the Results page when opened from an email link."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/scans",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            },
+            params={"id": f"eq.{scan_id}", "select": "*"}
+        )
+        rows = r.json()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Result not found")
+
+    row = rows[0]
+
+    # If scan is still running or pending, return status so frontend can poll
+    if row["status"] in ("pending", "running"):
+        return {"scan_id": scan_id, "status": row["status"]}
+
+    # If scan failed, return error info
+    if row["status"] == "failed":
+        return {
+            "scan_id": scan_id,
+            "status": "failed",
+            "error_type": row.get("error_type"),
+            "error_message": row.get("error_message"),
+            "url": row.get("url"),
+        }
+
+    # Completed — return the full result
+    result = row.get("result")
+    if isinstance(result, str):
+        result = json.loads(result)
+
+    if result:
+        # Ensure scan_id is in the result
+        result["scan_id"] = scan_id
+        return result
+
+    # Fallback: return basic info from the row
+    return {
+        "scan_id": scan_id,
+        "score": row.get("score", 0),
+        "url": row.get("url"),
+        "profession": row.get("profession"),
+        "status": "completed",
+        "is_free_scan": row.get("is_free_scan", True),
+        "checks": [],
+    }
 
 
 # --- Health check ---
