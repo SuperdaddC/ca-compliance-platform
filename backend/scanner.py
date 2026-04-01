@@ -226,16 +226,23 @@ async def scrape_website(url: str) -> dict:
         )
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
-            user_agent="Mozilla/5.0 (compatible; ComplyWithJudy/2.0; +https://complywithjudy.com/bot)"
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
         try:
             page = await context.new_page()
 
-            # Navigate with a generous timeout; catch specific errors
+            # Navigate — use domcontentloaded instead of networkidle
+            # (heavy RE sites with trackers/chat widgets never go fully idle)
             try:
-                await page.goto(url, wait_until="networkidle", timeout=45000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             except PlaywrightTimeout:
                 raise TimeoutError(f"timeout loading {url}")
+
+            # Give JS-rendered content time to load after DOM ready
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeout:
+                log.info(f"networkidle timeout for {url} — proceeding with what loaded")
 
             # Scroll to trigger lazy-loaded footer content (where disclosures often live)
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
