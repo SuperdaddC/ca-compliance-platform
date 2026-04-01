@@ -806,9 +806,9 @@ async def scan(req: ScanRequest, request: Request):
                     "description": r.description,
                     "detail": r.detail,
                     "source_url": r.source_url,
-                    "fix": None if is_free else r.fix,   # locked for free users
-                    "regulation": None if is_free else r.regulation,
-                    "webmaster_email": None if is_free else r.webmaster_email,
+                    "fix": r.fix,
+                    "regulation": r.regulation,
+                    "webmaster_email": r.webmaster_email,
                 }
                 for r in rule_results
             ]
