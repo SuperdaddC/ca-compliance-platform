@@ -15,6 +15,12 @@
   to = "https://scanner.complywithjudy.com/:splat"
   status = 200
 
+# SPA fallback — all routes go to index.html for React Router
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
 [[headers]]
   for = "/*"
   [headers.values]
