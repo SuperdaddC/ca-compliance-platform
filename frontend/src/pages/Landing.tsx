@@ -1,11 +1,24 @@
 import { Link } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import { useAuth } from '../App'
-import { PLANS } from '../lib/api'
+import { PLANS, createCheckout } from '../lib/api'
 import type { PlanKey } from '../lib/api'
 
 export default function Landing() {
-  const { user: _user } = useAuth()
+  const { user } = useAuth()
+
+  async function handlePlanClick(plan: PlanKey) {
+    try {
+      const url = await createCheckout({
+        plan,
+        email: user?.email,
+        userId: user?.id,
+      })
+      window.location.href = url
+    } catch {
+      alert('Could not start checkout. Please try again.')
+    }
+  }
 
   return (
     <div className="min-h-screen bg-white">
@@ -92,7 +105,17 @@ export default function Landing() {
                     <span className="text-sm text-gray-500">{plan.period}</span>
                   </div>
                   <p className="text-sm text-gray-500 mb-3">{plan.scans}</p>
-                  <p className="text-xs text-gray-400">{plan.description}</p>
+                  <p className="text-xs text-gray-400 mb-4">{plan.description}</p>
+                  <button
+                    onClick={() => handlePlanClick(key)}
+                    className={`w-full py-2 rounded-lg font-semibold text-sm transition-colors ${
+                      plan.highlight
+                        ? 'bg-brand-gold hover:bg-brand-gold-dark text-white'
+                        : 'bg-brand-blue hover:bg-blue-800 text-white'
+                    }`}
+                  >
+                    {key === 'single' ? 'Buy Now' : 'Get Started'}
+                  </button>
                 </div>
               )
             })}

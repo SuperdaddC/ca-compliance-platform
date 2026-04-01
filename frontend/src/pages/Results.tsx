@@ -296,7 +296,14 @@ export default function Results() {
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <Link to="/" className="hover:text-brand-blue transition-colors">Home</Link>
             <span>/</span>
-            <span className="text-gray-900 font-medium truncate max-w-xs">{scan.url}</span>
+            <a
+              href={scan.url.startsWith('http') ? scan.url : `https://${scan.url}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-brand-blue font-medium truncate max-w-xs hover:text-brand-gold transition-colors"
+            >
+              {scan.url}
+            </a>
           </div>
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">
             Compliance Report
@@ -403,7 +410,7 @@ export default function Results() {
                 onClick={() => handleCheckout('single')}
                 className="flex-shrink-0 bg-brand-gold hover:bg-brand-gold-dark text-white font-bold px-6 py-3 rounded-xl transition-colors shadow"
               >
-                Get Fix Instructions — $19
+                Get Fix Instructions — $19.99
               </button>
             </div>
           </div>
@@ -460,13 +467,13 @@ export default function Results() {
                 onClick={() => handleCheckout('single')}
                 className="bg-brand-gold hover:bg-brand-gold-dark text-white font-bold px-6 py-3 rounded-xl transition-colors"
               >
-                Get This Report — $19
+                Get This Report — $19.99
               </button>
               <button
                 onClick={() => handleCheckout('starter')}
                 className="bg-brand-blue hover:bg-blue-900 text-white font-bold px-6 py-3 rounded-xl transition-colors"
               >
-                Go Starter — $29/year
+                Go Starter — $29.99/year
               </button>
             </div>
             {!user && (

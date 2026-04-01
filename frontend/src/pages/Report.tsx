@@ -152,7 +152,9 @@ export default function Report() {
                 {profLabel} &nbsp;·&nbsp; {date}
               </p>
               <p style={{ margin: '6px 0 0', fontSize: 14, color: '#374151', fontWeight: 500, wordBreak: 'break-all' }}>
-                {scan.url}
+                <a href={scan.url.startsWith('http') ? scan.url : `https://${scan.url}`} target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb', textDecoration: 'none' }}>
+                  {scan.url}
+                </a>
               </p>
             </div>
             <ScoreRing score={scan.score} />

@@ -219,7 +219,7 @@ export async function captureEmailLead(email: string, source: string = 'scan'): 
 export const PLANS = {
   starter: {
     name: 'Starter',
-    price: '$29',
+    price: '$29.99',
     period: '/year',
     scans: '5 scans',
     description: 'Perfect for solo agents — annual compliance check',
@@ -227,7 +227,7 @@ export const PLANS = {
   },
   professional: {
     name: 'Professional',
-    price: '$79',
+    price: '$79.99',
     period: '/year',
     scans: '25 scans',
     description: 'Active agents & team leads who update their sites regularly',
@@ -235,7 +235,7 @@ export const PLANS = {
   },
   broker: {
     name: 'Broker / Team',
-    price: '$199',
+    price: '$199.99',
     period: '/year',
     scans: 'Unlimited · 10 domains',
     description: 'Brokerages managing multiple agents and websites',
@@ -243,7 +243,7 @@ export const PLANS = {
   },
   single: {
     name: 'Single Scan',
-    price: '$19',
+    price: '$19.99',
     period: 'one time',
     scans: '1 scan with full fix report',
     description: 'Try it before you subscribe',
