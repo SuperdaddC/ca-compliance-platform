@@ -1,8 +1,22 @@
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../App'
 
 export default function Navbar() {
   const { user, signOut } = useAuth()
+  const navigate = useNavigate()
+
+  function handlePricingClick(e: React.MouseEvent) {
+    e.preventDefault()
+    const el = document.getElementById('pricing')
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth' })
+    } else {
+      navigate('/')
+      setTimeout(() => {
+        document.getElementById('pricing')?.scrollIntoView({ behavior: 'smooth' })
+      }, 100)
+    }
+  }
 
   return (
     <nav className="bg-white border-b border-gray-200">
@@ -18,9 +32,9 @@ export default function Navbar() {
           <Link to="/checks" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">
             Checks
           </Link>
-          <Link to="/#pricing" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">
+          <a href="/#pricing" onClick={handlePricingClick} className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors cursor-pointer">
             Pricing
-          </Link>
+          </a>
           {user ? (
             <>
               <Link to="/dashboard" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">
