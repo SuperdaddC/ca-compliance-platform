@@ -399,7 +399,7 @@ EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s*(opportunity|lender|logo)?', r
 EHO_IMG_RE     = re.compile(r'(equal[_\-.\s]?housing|eho[_\-.]?(logo|icon|badge|seal)?\.?(png|svg|jpg|gif|webp)?|fair[_\-.\s]?housing|equal[_\-.\s]?opportunity)', re.I)
 CCPA_RE        = re.compile(r'privacy\s+policy|ccpa|do\s+not\s+sell', re.I)
 DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
-ADA_RE         = re.compile(r'accessibility|ada\s+complian|wcag', re.I)
+ADA_RE         = re.compile(r'accessibility\s+(statement|policy|commitment|pledge|notice)|ada\s+complian|wcag|section\s+508|web\s+accessibility', re.I)
 PHYSICAL_ADDR_RE = re.compile(r'\b\d{2,5}\s+[A-Z][a-z]+.*?(ave|st|blvd|dr|rd|ln|ct|way|pkwy|pl|cir)\b', re.I)
 
 # TILA
@@ -702,14 +702,17 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> lis
             regulation="Business & Professions Code §10162 — Licensees must maintain a definite place of business. Displaying the address on advertising is best practice."))
 
     # 10. ADA accessibility
-    if ADA_RE.search(text):
+    has_ada_text = bool(ADA_RE.search(text))
+    # Check for common accessibility widget scripts (UserWay, accessiBe, AudioEye, EqualWeb, etc.)
+    has_ada_widget = bool(re.search(r'userway|accessibe|audioeye|equalweb|accessibilitywidget|ada\.compliance|accesswidget', html, re.I))
+    if has_ada_text or has_ada_widget:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "pass",
-            "Accessibility statement or compliance language found.",
+            "Accessibility statement or compliance tool found.",
             source_url="https://www.ada.gov/resources/web-guidance/",
             regulation="Americans with Disabilities Act, Title III (42 U.S.C. §12182) — Public accommodations, which courts have interpreted to include websites, must be accessible to individuals with disabilities. DOJ guidance (March 2022) confirms websites must be accessible."))
     else:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "warn",
-            "No accessibility statement detected on this page.",
+            "No accessibility statement or compliance tool detected on this page.",
             detail="While not a DRE requirement, the ADA requires websites of public accommodations to be accessible. NAR recommends all REALTOR websites include an accessibility statement.",
             source_url="https://www.ada.gov/resources/web-guidance/",
             regulation="ADA Title III (42 U.S.C. §12182) — Websites of public accommodations must be accessible. NAR Accessibility Best Practices (2023) recommend an accessibility statement and WCAG 2.1 AA conformance.",
@@ -835,14 +838,16 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
             regulation="SAFE Act and NMLS best practices require consumers to be able to contact the licensed MLO."))
 
     # 8. ADA accessibility
-    if ADA_RE.search(text):
+    has_ada_text = bool(ADA_RE.search(text))
+    has_ada_widget = bool(re.search(r'userway|accessibe|audioeye|equalweb|accessibilitywidget|ada\.compliance|accesswidget', html, re.I))
+    if has_ada_text or has_ada_widget:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "pass",
-            "Accessibility statement or compliance language found.",
+            "Accessibility statement or compliance tool found.",
             source_url="https://www.ada.gov/resources/web-guidance/",
             regulation="ADA Title III (42 U.S.C. §12182) — Websites of public accommodations must be accessible to individuals with disabilities."))
     else:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "warn",
-            "No accessibility statement detected.",
+            "No accessibility statement or compliance tool detected.",
             detail="The ADA requires websites of public accommodations (which includes financial services) to be accessible. CFPB has also emphasized digital accessibility for mortgage servicers.",
             source_url="https://www.ada.gov/resources/web-guidance/",
             regulation="ADA Title III (42 U.S.C. §12182) — Public accommodations must be accessible. CFPB has issued guidance on digital accessibility for financial services websites.",
