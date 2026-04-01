@@ -872,6 +872,55 @@ def score_results(results: list[RuleResult]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Email notification (calls Netlify function)
+# ---------------------------------------------------------------------------
+EMAIL_FUNCTION_URL = os.getenv("EMAIL_FUNCTION_URL", "https://complywithjudy.com/.netlify/functions/send-email")
+
+async def send_scan_email(email: str, scan_id: str, response: dict, is_paid: bool = False):
+    """Fire-and-forget email notification after scan completes."""
+    try:
+        checks = response.get("checks", [])
+        passed = sum(1 for c in checks if c["status"] == "pass")
+        warnings = sum(1 for c in checks if c["status"] == "warn")
+        failed = sum(1 for c in checks if c["status"] == "fail")
+        total = sum(1 for c in checks if c["status"] != "skip")
+
+        payload = {
+            "to": email,
+            "scanId": scan_id,
+            "url": response.get("url", ""),
+            "score": response.get("score", 0),
+            "profession": response.get("profession", "realestate"),
+            "passed": passed,
+            "warnings": warnings,
+            "failed": failed,
+            "totalChecks": total,
+            "isPaid": is_paid,
+            "checks": [
+                {
+                    "name": c["name"],
+                    "status": c["status"],
+                    "description": c["description"],
+                    "fix": c.get("fix") or "",
+                }
+                for c in checks if c["status"] != "skip"
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{EMAIL_FUNCTION_URL}/scan-complete",
+                json=payload,
+            )
+            if resp.status_code == 200:
+                log.info(f"Scan email sent to {email} for {scan_id}")
+            else:
+                log.warning(f"Scan email failed ({resp.status_code}): {resp.text}")
+    except Exception as e:
+        log.warning(f"Scan email error (non-fatal): {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main scan endpoint
 # ---------------------------------------------------------------------------
 @app.post("/scan")
@@ -940,6 +989,9 @@ async def scan(req: ScanRequest, request: Request):
         # Record fingerprint for free scans
         if is_free and scan_id:
             await record_fingerprint(ip, req.email, scan_id)
+
+        # Send email notification (fire-and-forget)
+        await send_scan_email(req.email, response["scan_id"], response, is_paid=not is_free)
 
         return response
 
