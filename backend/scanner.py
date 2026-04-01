@@ -117,7 +117,7 @@ def make_fingerprint(ip: str, email: str) -> str:
     raw = f"{ip}:{email.lower().strip()}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
-ADMIN_EMAILS = {"mike@thecolyerteam.com"}
+ADMIN_EMAILS = {"mike@thecolyerteam.com", "mjcolyer@gmail.com"}
 
 async def check_scan_allowed(ip: str, email: str, user_id: Optional[str]) -> tuple[bool, str]:
     """
