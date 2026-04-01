@@ -326,12 +326,17 @@ async def scrape_website(url: str) -> dict:
             raw_html   = await page.evaluate("() => document.body.innerHTML") or ""
             head_html  = await page.evaluate("() => document.head ? document.head.innerHTML : ''") or ""
 
+            # Extract alt text, title, and aria-label from tags before stripping
+            # (preserves "Equal Housing Opportunity" etc. from image alt attributes)
+            attr_text_parts = re.findall(r'(?:alt|title|aria-label)\s*=\s*"([^"]*)"', raw_html, re.I)
+            attr_text = " ".join(attr_text_parts)
+
             # Strip tags, collapse whitespace
             def strip(h): return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', h)).strip()
 
             stripped_html = strip(raw_html)
             head_text     = strip(head_html)
-            combined      = f"{inner_text}\n{stripped_html}\n{head_text}".lower()
+            combined      = f"{inner_text}\n{stripped_html}\n{head_text}\n{attr_text}".lower()
 
             if len(combined.strip()) < 100:
                 raise ValueError("empty_page: page rendered with no content")
@@ -345,12 +350,36 @@ async def scrape_website(url: str) -> dict:
                 "() => [...new Set([...document.querySelectorAll('a[href]')].map(a=>a.href).filter(h=>h.startsWith(window.location.origin)))].length"
             )
 
+            # Detect EHO / Fair Housing logo via DOM (catches images, SVGs, iframes)
+            eho_signals = await page.evaluate("""() => {
+                const kw = /equal.?housing|eho|fair.?housing|equal.?opportunity/i;
+                const signals = [];
+                // Check all img src and alt
+                document.querySelectorAll('img').forEach(img => {
+                    if (kw.test(img.src) || kw.test(img.alt || '') || kw.test(img.title || ''))
+                        signals.push('img:' + (img.alt || img.src).substring(0, 80));
+                });
+                // Check SVG title/desc and nearby text
+                document.querySelectorAll('svg').forEach(svg => {
+                    const t = (svg.textContent || '') + (svg.getAttribute('aria-label') || '');
+                    if (kw.test(t)) signals.push('svg:' + t.substring(0, 80));
+                });
+                // Check aria-label on any element
+                document.querySelectorAll('[aria-label]').forEach(el => {
+                    if (kw.test(el.getAttribute('aria-label')))
+                        signals.push('aria:' + el.getAttribute('aria-label').substring(0, 80));
+                });
+                return signals;
+            }""")
+            log.info(f"EHO DOM signals for {url}: {eho_signals}")
+
             return {
                 "text": combined,
                 "raw_html": raw_html[:200000],  # cap at 200k chars
                 "screenshot_hex": screenshot_b64,
                 "internal_link_count": links,
                 "url_final": page.url,
+                "eho_signals": eho_signals,
             }
 
         finally:
@@ -364,8 +393,8 @@ async def scrape_website(url: str) -> dict:
 DRE_LICENSE_RE = re.compile(r'\bdre\s*#?\s*\d{7,9}\b|\bcalifornia\s+real\s+estate\s+broker\s+#?\s*\d{7,9}\b|\bcalbre\s*#?\s*\d{7,9}\b', re.I)
 BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*#?\s*\d{7,9}\b', re.I)
 NMLS_RE        = re.compile(r'\bnmls\s*#?\s*\d{4,10}\b', re.I)
-EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s+(opportunity|lender|logo)', re.I)
-EHO_IMG_RE     = re.compile(r'(equal.housing|eho[\-_]?logo|fair.housing)', re.I)
+EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s*(opportunity|lender|logo)?', re.I)
+EHO_IMG_RE     = re.compile(r'(equal[_\-.\s]?housing|eho[_\-.]?(logo|icon|badge|seal)?\.?(png|svg|jpg|gif|webp)?|fair[_\-.\s]?housing|equal[_\-.\s]?opportunity)', re.I)
 CCPA_RE        = re.compile(r'privacy\s+policy|ccpa|do\s+not\s+sell', re.I)
 DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
 ADA_RE         = re.compile(r'accessibility|ada\s+complian|wcag', re.I)
@@ -499,7 +528,7 @@ def check_tila_proximity(text: str) -> RuleResult:
 # ---------------------------------------------------------------------------
 # Real Estate checks
 # ---------------------------------------------------------------------------
-def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
+def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> list[RuleResult]:
     results = []
 
     # 1. DRE license number
@@ -535,7 +564,8 @@ def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
     # 3. Equal Housing Opportunity
     has_text = bool(EQUAL_HOUSING_RE.search(text))
     has_img  = bool(EHO_IMG_RE.search(html))
-    if has_text or has_img:
+    has_dom  = bool(eho_signals)  # detected via DOM query in scraper
+    if has_text or has_img or has_dom:
         results.append(RuleResult("equal_housing", "Equal Housing Opportunity", "pass",
             "Equal Housing Opportunity logo or statement found.",
             source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp/advertising_and_marketing",
@@ -689,7 +719,7 @@ def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
 # ---------------------------------------------------------------------------
 # Lending / MLO checks
 # ---------------------------------------------------------------------------
-def run_lending_checks(text: str, html: str) -> list[RuleResult]:
+def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[RuleResult]:
     results = []
 
     # 1. TILA / Reg Z APR proximity
@@ -727,7 +757,8 @@ def run_lending_checks(text: str, html: str) -> list[RuleResult]:
     # 4. Equal Housing Lender
     has_lender = bool(re.search(r'equal\s+housing\s+lender', text, re.I))
     has_img    = bool(EHO_IMG_RE.search(html))
-    if has_lender or has_img:
+    has_dom    = bool(eho_signals)  # detected via DOM query in scraper
+    if has_lender or has_img or has_dom:
         results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "pass",
             "Equal Housing Lender statement or logo found.",
             source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/4/",
@@ -983,11 +1014,12 @@ async def scan(req: ScanRequest, request: Request):
         scraped = await scrape_website(url)
         text = scraped["text"]
         html = scraped["raw_html"]
+        eho_signals = scraped.get("eho_signals", [])
 
         if req.profession == "lending":
-            rule_results = run_lending_checks(text, html)
+            rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
         else:
-            rule_results = run_realestate_checks(text, html)
+            rule_results = run_realestate_checks(text, html, eho_signals=eho_signals)
 
         # --- Shared checks (both professions) ---
         ai_check = await check_ai_crawler_blocking(scraped["url_final"])
