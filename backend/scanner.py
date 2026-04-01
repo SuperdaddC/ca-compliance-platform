@@ -567,9 +567,12 @@ def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
                 regulation="Commissioner's Regulation §2770.1 — VOA operators must display the responsible broker's name, license number, and comply with all other advertising regulations under §2773.",
                 fix="Add your DRE license number and broker information to the virtual office page."))
 
-    # 7. CCPA privacy policy
-    has_privacy = CCPA_RE.search(text)
-    has_dns     = DO_NOT_SELL_RE.search(text)
+    # 7. CCPA privacy policy (check both text and HTML for links/anchors)
+    has_privacy = CCPA_RE.search(text) or \
+                  bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
+                  bool(re.search(r'href=["\'][^"\']*privacy[^"\']*["\']', html, re.I))
+    has_dns     = DO_NOT_SELL_RE.search(text) or \
+                  bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
     if has_privacy:
         if has_dns:
             results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "pass",
@@ -594,7 +597,10 @@ def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
 
     # 8. Contact information
     has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
-    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I))
+    # Check for email in text AND in mailto: links in the raw HTML
+    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I)) or \
+                bool(re.search(r'mailto:[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', html, re.I)) or \
+                bool(re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us', text, re.I))
     has_addr  = bool(PHYSICAL_ADDR_RE.search(text))
     if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
