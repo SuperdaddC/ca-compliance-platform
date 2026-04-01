@@ -10,6 +10,9 @@ interface CheckResultProps {
     status: 'pass' | 'warn' | 'fail' | 'na'
     detail: string
     remediation?: string
+    regulation?: string
+    source_url?: string
+    webmaster_email?: string
     screenshot_url?: string
   }
   isPaidTier: boolean
@@ -69,6 +72,7 @@ export default function CheckResult({ scanId, check, isPaidTier, onScreenshotUpl
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(check.screenshot_url ?? null)
   const [isExpanded, setIsExpanded] = useState(false)
+  const [emailCopied, setEmailCopied] = useState(false)
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -127,11 +131,32 @@ export default function CheckResult({ scanId, check, isPaidTier, onScreenshotUpl
 
       {isExpanded && (
         <div className="mt-4 ml-8 space-y-3">
+          {/* Regulation citation (always visible) */}
+          {check.regulation && (
+            <div className="rounded-md bg-white border border-gray-200 p-3">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                Regulation
+              </p>
+              <p className="text-sm text-gray-700 italic">{check.regulation}</p>
+              {check.source_url && (
+                <a
+                  href={check.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block text-xs text-brand-blue hover:text-brand-gold mt-1.5 font-medium"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  View source regulation →
+                </a>
+              )}
+            </div>
+          )}
+
           {/* Warning: screenshot upload */}
           {check.status === 'warn' && (
             <div className="rounded-md bg-white border border-amber-200 p-3">
               <p className="text-sm font-medium text-amber-800 mb-2">
-                📸 Upload a screenshot to verify — we'll update your score
+                Upload a screenshot to verify — we'll update your score
               </p>
               {screenshotUrl ? (
                 <div className="space-y-2">
@@ -140,7 +165,7 @@ export default function CheckResult({ scanId, check, isPaidTier, onScreenshotUpl
                     alt="Verification screenshot"
                     className="max-h-40 rounded border border-gray-200"
                   />
-                  <p className="text-xs text-green-600 font-medium">✓ Screenshot submitted for review</p>
+                  <p className="text-xs text-green-600 font-medium">Screenshot submitted for review</p>
                 </div>
               ) : (
                 <label className="block">
@@ -170,7 +195,7 @@ export default function CheckResult({ scanId, check, isPaidTier, onScreenshotUpl
                 How to fix this
               </p>
               {isPaidTier ? (
-                <p className="text-sm text-gray-700">{check.remediation}</p>
+                <p className="text-sm text-gray-700 whitespace-pre-line">{check.remediation}</p>
               ) : (
                 <div className="relative">
                   <p className="text-sm text-gray-700 filter blur-sm select-none">
@@ -183,6 +208,50 @@ export default function CheckResult({ scanId, check, isPaidTier, onScreenshotUpl
                       onClick={(e) => e.stopPropagation()}
                     >
                       Upgrade to see fix →
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Webmaster email template (paid tier only, fail/warn only) */}
+          {(check.status === 'fail' || check.status === 'warn') && check.webmaster_email && (
+            <div className="rounded-md bg-white border border-blue-200 p-3">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  Email to send your webmaster
+                </p>
+                {isPaidTier && (
+                  <button
+                    className="text-xs text-brand-blue hover:text-brand-gold font-medium"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      navigator.clipboard.writeText(check.webmaster_email ?? '')
+                      setEmailCopied(true)
+                      setTimeout(() => setEmailCopied(false), 2000)
+                    }}
+                  >
+                    {emailCopied ? 'Copied!' : 'Copy to clipboard'}
+                  </button>
+                )}
+              </div>
+              {isPaidTier ? (
+                <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed bg-gray-50 rounded p-2 max-h-48 overflow-y-auto">
+                  {check.webmaster_email}
+                </pre>
+              ) : (
+                <div className="relative">
+                  <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans leading-relaxed filter blur-sm select-none bg-gray-50 rounded p-2">
+                    {check.webmaster_email}
+                  </pre>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <a
+                      href="/#pricing"
+                      className="bg-brand-gold text-white text-xs font-semibold px-3 py-1.5 rounded-md shadow hover:bg-brand-gold-dark transition-colors"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      Upgrade to copy email →
                     </a>
                   </div>
                 </div>

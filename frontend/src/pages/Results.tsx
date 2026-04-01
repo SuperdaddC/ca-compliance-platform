@@ -22,6 +22,9 @@ interface ScanData {
     status: 'pass' | 'warn' | 'fail' | 'na'
     detail: string
     remediation?: string
+    regulation?: string
+    source_url?: string
+    webmaster_email?: string
     screenshot_url?: string
   }[]
   created_at: string
@@ -45,9 +48,12 @@ function transformResult(raw: ScanResultType): ScanData {
       id: c.id,
       label: c.name,
       category: 'General',
-      status: c.status === 'skip' ? 'na' as const : c.status,
+      status: (c.status === 'skip' ? 'na' : c.status) as 'pass' | 'warn' | 'fail' | 'na',
       detail: c.description,
       remediation: c.fix ?? undefined,
+      regulation: c.regulation ?? undefined,
+      source_url: c.source_url ?? undefined,
+      webmaster_email: c.webmaster_email ?? undefined,
     })),
     created_at: new Date().toISOString(),
     plan: raw.plan ?? (raw.is_free_scan ? undefined : 'single'),

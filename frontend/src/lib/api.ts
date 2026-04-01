@@ -45,6 +45,8 @@ export interface CheckResult {
   detail?: string
   source_url?: string
   fix?: string | null
+  regulation?: string
+  webmaster_email?: string
 }
 
 export type PlanKey = 'starter' | 'professional' | 'broker' | 'single'
