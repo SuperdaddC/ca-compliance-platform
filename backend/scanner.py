@@ -600,7 +600,8 @@ def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
     # Check for email in text AND in mailto: links in the raw HTML
     has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I)) or \
                 bool(re.search(r'mailto:[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', html, re.I)) or \
-                bool(re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us', text, re.I))
+                bool(re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us|send\s+(a\s+)?message|get\s+in\s+touch|reach\s+(out|us)', text, re.I)) or \
+                bool(re.search(r'href=["\'][^"\']*(/contact|/email|/reach-out|/get-in-touch|/message)[^"\']*["\']', html, re.I))
     has_addr  = bool(PHYSICAL_ADDR_RE.search(text))
     if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
