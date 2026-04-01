@@ -6,9 +6,8 @@
 
 [build.environment]
   NODE_VERSION = "18"
-  VITE_SUPABASE_URL = "https://mvdqlttptgwndoccotgg.supabase.co"
-  VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im12ZHFsdHRwdGd3bmRvY2NvdGdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ5ODM2NDcsImV4cCI6MjA5MDU1OTY0N30.Ln1IqfoxIBtjmrZPu-oNiSO8o594VASSMXAZAEbkD10"
-  VITE_SCANNER_URL = "https://scanner.complywithjudy.com"
+  # VITE_ vars are set in Netlify dashboard (Site > Environment variables)
+  # VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_SCANNER_URL
 
 [[redirects]]
   from = "/api/*"

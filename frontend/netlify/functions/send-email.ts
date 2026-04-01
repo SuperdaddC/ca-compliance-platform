@@ -5,7 +5,7 @@
 import type { Handler } from '@netlify/functions';
 import * as nodemailer from 'nodemailer';
 
-const GMAIL_USER = 'judy@vip.thecolyerteam.com';
+const GMAIL_USER = process.env.GMAIL_USER || 'judy@vip.thecolyerteam.com';
 const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || '';
 
 const transporter = nodemailer.createTransport({
@@ -295,7 +295,7 @@ async function handleScanComplete(body: ScanEmailData) {
 
   try {
     await transporter.sendMail({
-      from: '"Judy from ComplyWithJudy" <judy@vip.thecolyerteam.com>',
+      from: `"Judy from ComplyWithJudy" <${GMAIL_USER}>`,
       to: body.to,
       subject: emailContent.subject,
       html: emailContent.html,
