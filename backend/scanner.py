@@ -69,7 +69,7 @@ class ScanErrorType(str, Enum):
 
 ERROR_MESSAGES = {
     ScanErrorType.TIMEOUT:      "The website took too long to respond. It may be slow or blocking scanners. Try again or contact support.",
-    ScanErrorType.BLOCKED:      "The website blocked our scanner (firewall or CAPTCHA). This is common on large brokerages. Contact support for a manual review option.",
+    ScanErrorType.BLOCKED:      "This website's firewall blocked our scan (usually Imperva, PerimeterX, or similar bot protection). No charge for blocked scans. You can use your scan credit on a different site, ask the site owner to whitelist our scanner, or contact us at support@complywithjudy.com for a manual review.",
     ScanErrorType.DNS_FAIL:     "The domain couldn't be found. Check that the URL is correct and the site is live.",
     ScanErrorType.SSL_ERROR:    "The website has an SSL/certificate error. This itself may be a compliance issue.",
     ScanErrorType.EMPTY_PAGE:   "The website loaded but appeared empty — it may require login or use unsupported rendering.",
@@ -790,6 +790,71 @@ def run_lending_checks(text: str, html: str) -> list[RuleResult]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# Shared checks (all professions)
+# ---------------------------------------------------------------------------
+AI_BOTS = ["GPTBot", "ClaudeBot", "Claude-Web", "Google-Extended", "CCBot", "PerplexityBot", "Bytespider", "anthropic-ai"]
+
+async def check_ai_crawler_blocking(final_url: str) -> RuleResult:
+    """Check if robots.txt or meta tags block AI crawlers."""
+    from urllib.parse import urlparse
+    parsed = urlparse(final_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+
+    blocked_bots = []
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+            r = await client.get(robots_url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; ComplyWithJudy/2.0)"
+            })
+            if r.status_code == 200:
+                robots_text = r.text.lower()
+                current_agent = None
+                for line in robots_text.splitlines():
+                    line = line.strip()
+                    if line.startswith("user-agent:"):
+                        current_agent = line.split(":", 1)[1].strip()
+                    elif line.startswith("disallow:") and current_agent:
+                        path = line.split(":", 1)[1].strip()
+                        if path == "/" or path == "/*":
+                            for bot in AI_BOTS:
+                                if bot.lower() == current_agent or current_agent == "*":
+                                    # Only flag wildcard block if it's clearly targeting AI
+                                    if current_agent != "*":
+                                        blocked_bots.append(bot)
+    except Exception as e:
+        log.debug(f"robots.txt fetch failed for {robots_url}: {e}")
+
+    # Deduplicate
+    blocked_bots = list(set(blocked_bots))
+
+    if not blocked_bots:
+        return RuleResult(
+            id="ai_crawler_access",
+            name="AI Crawler Access",
+            status="pass",
+            description="Your site allows AI-powered search tools to index your content.",
+            source_url="https://developers.google.com/search/docs/crawling-indexing/overview-google-crawlers",
+            regulation="While not legally required, blocking AI crawlers (GPTBot, ClaudeBot, Google-Extended) removes your site from AI-powered search results including ChatGPT, Perplexity, Google AI Overviews, and other tools that increasingly drive real estate leads.",
+            fix="No action needed. Your site is discoverable by AI search tools."
+        )
+
+    bot_list = ", ".join(blocked_bots)
+    return RuleResult(
+        id="ai_crawler_access",
+        name="AI Crawler Access",
+        status="warn",
+        description=f"Your robots.txt blocks AI crawlers: {bot_list}. This reduces your visibility in AI-powered search.",
+        source_url="https://developers.google.com/search/docs/crawling-indexing/overview-google-crawlers",
+        regulation="Blocking AI crawlers is your right, but it comes at a cost. AI-powered tools like ChatGPT, Google AI Overviews, and Perplexity are increasingly how consumers find real estate agents. Blocking these bots means your listings, reviews, and content won't appear in AI-generated answers — your competitors will show up instead.",
+        fix=f"Edit your robots.txt file and remove or modify the Disallow rules for: {bot_list}. If you're using Cloudflare, go to Security > Bots and disable 'Block AI Scrapers and Crawlers.' If your hosting provider set this up, ask them to allow AI crawlers while keeping malicious bot protection.",
+        webmaster_email=_webmaster_email(
+            "SEO: Our Website Is Blocking AI Search Crawlers",
+            f"Hi,\n\nOur robots.txt is currently blocking the following AI crawlers: {bot_list}\n\nThis means our site won't appear in AI-powered search results (ChatGPT, Google AI Overviews, Perplexity, etc.). These tools are increasingly how consumers search for real estate agents and listings.\n\nPlease update robots.txt to allow these crawlers. If we're using Cloudflare, the setting is under Security > Bots > 'Block AI Scrapers and Crawlers' — turn it off.\n\nOur competitors are showing up in these AI results and we're not. Let's fix this ASAP.\n\nPlease confirm when this has been updated."
+        ),
+    )
+
+
 def score_results(results: list[RuleResult]) -> int:
     """Calculate 0-100 compliance score with weighted severity."""
     scorable = [r for r in results if r.status != "skip"]
@@ -827,6 +892,10 @@ async def scan(req: ScanRequest, request: Request):
             rule_results = run_lending_checks(text, html)
         else:
             rule_results = run_realestate_checks(text, html)
+
+        # --- Shared checks (both professions) ---
+        ai_check = await check_ai_crawler_blocking(scraped["url_final"])
+        rule_results.append(ai_check)
 
         score = score_results(rule_results)
         elapsed = round(time.time() - t0, 1)
