@@ -4,6 +4,7 @@ import Navbar from '../components/Navbar'
 import ScoreCircle from '../components/ScoreCircle'
 import CheckResult from '../components/CheckResult'
 import { useAuth } from '../App'
+import ComplianceBadge from '../components/ComplianceBadge'
 import { getScanResult, retryScan, createCheckout } from '../lib/api'
 import type { ScanResult as ScanResultType } from '../lib/api'
 
@@ -453,6 +454,13 @@ export default function Results() {
             )
           })}
         </div>
+
+        {/* Compliance badge (paid users) */}
+        {userIsPaid && scan.score >= 60 && (
+          <div className="mt-6">
+            <ComplianceBadge scanId={scan.id} score={scan.score} url={scan.url} />
+          </div>
+        )}
 
         {/* Bottom upgrade section */}
         {isOnFreeTier && (

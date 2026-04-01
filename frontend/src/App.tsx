@@ -12,6 +12,7 @@ import Dashboard from './pages/Dashboard'
 import CheckoutSuccess from './pages/CheckoutSuccess'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
+import Badge from './pages/Badge'
 
 // Auth context
 interface AuthContextType {
@@ -118,6 +119,7 @@ export default function App() {
           <Route path="/checkout/success" element={<CheckoutSuccess />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/badge/:scanId" element={<Badge />} />
           <Route
             path="/dashboard"
             element={
