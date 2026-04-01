@@ -280,12 +280,15 @@ async def scrape_website(url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 # --- Shared patterns ---
-DRE_LICENSE_RE = re.compile(r'\bdre\s*#?\s*\d{7,9}\b|\bcalifornia\s+real\s+estate\s+broker\s+#?\s*\d{7,9}\b', re.I)
+DRE_LICENSE_RE = re.compile(r'\bdre\s*#?\s*\d{7,9}\b|\bcalifornia\s+real\s+estate\s+broker\s+#?\s*\d{7,9}\b|\bcalbre\s*#?\s*\d{7,9}\b', re.I)
+BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*#?\s*\d{7,9}\b', re.I)
 NMLS_RE        = re.compile(r'\bnmls\s*#?\s*\d{4,10}\b', re.I)
 EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s+(opportunity|lender|logo)', re.I)
 EHO_IMG_RE     = re.compile(r'(equal.housing|eho[\-_]?logo|fair.housing)', re.I)
 CCPA_RE        = re.compile(r'privacy\s+policy|ccpa|do\s+not\s+sell', re.I)
+DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
 ADA_RE         = re.compile(r'accessibility|ada\s+complian|wcag', re.I)
+PHYSICAL_ADDR_RE = re.compile(r'\b\d{2,5}\s+[A-Z][a-z]+.*?(ave|st|blvd|dr|rd|ln|ct|way|pkwy|pl|cir)\b', re.I)
 
 # TILA
 TILA_TRIGGER_RE = re.compile(
@@ -309,6 +312,7 @@ AB723_RE = re.compile(
     r'(virtually\s+staged|digitally\s+enhanced|photo.*altered|ai.generated|image.*modified)', re.I
 )
 VIRTUAL_OFFICE_RE = re.compile(r'virtual\s+office|voa\b', re.I)
+MLS_ATTR_RE = re.compile(r'(mls|multiple\s+listing|idx|internet\s+data\s+exchange)', re.I)
 
 
 @dataclass
@@ -320,17 +324,72 @@ class RuleResult:
     detail: str = ""
     source_url: str = ""
     fix: str = ""
+    regulation: str = ""         # exact regulation text
+    webmaster_email: str = ""    # pre-written email to send to webmaster
 
 
+# ---------------------------------------------------------------------------
+# Webmaster email templates
+# ---------------------------------------------------------------------------
+def _webmaster_email(subject: str, body: str) -> str:
+    """Return a mailto-ready email template."""
+    return f"Subject: {subject}\n\n{body}\n\n---\nThis issue was identified by ComplyWithJudy.com, a California real estate compliance scanner.\nLearn more at https://complywithjudy.com"
+
+
+WM_DRE_LICENSE = _webmaster_email(
+    "URGENT: DRE License Number Missing from Website",
+    "Hi,\n\nOur website is missing the required California DRE license number. Under California Business & Professions Code §10140.6 and Commissioner's Regulation §2773, all real estate advertising must include the responsible licensee's DRE license number.\n\nPlease add the following to the site footer so it appears on every page:\n\nDRE #[YOUR_NUMBER]\n\nThis is a legal requirement — failure to comply can result in DRE disciplinary action.\n\nPlease confirm when this has been updated."
+)
+
+WM_RESPONSIBLE_BROKER = _webmaster_email(
+    "URGENT: Responsible Broker Disclosure Missing",
+    "Hi,\n\nOur website is missing the required responsible broker disclosure. Under California Business & Professions Code §10159.5 and DRE Commissioner's Regulation §2773, all advertising by a salesperson must include the supervising broker's identity.\n\nPlease add to the site footer:\n\n[Agent Name], DRE #[AGENT_NUMBER]\n[Brokerage Name], DRE #[BROKER_NUMBER]\nResponsible Broker: [Broker Name]\n\nPlease confirm when this has been updated."
+)
+
+WM_EQUAL_HOUSING = _webmaster_email(
+    "Required: Equal Housing Opportunity Logo/Statement",
+    "Hi,\n\nOur website needs the Equal Housing Opportunity logo and/or statement. Under the Fair Housing Act (42 U.S.C. §3604) and HUD advertising guidelines (24 CFR Part 109), all real estate advertising must include this.\n\nPlease add the Equal Housing Opportunity logo to the site footer. You can download the official logo from HUD's website.\n\nPlease confirm when this has been updated."
+)
+
+WM_CCPA = _webmaster_email(
+    "Required: Privacy Policy Missing from Website",
+    "Hi,\n\nOur website is missing a privacy policy. Under the California Consumer Privacy Act (Civil Code §1798.100-199) and its 2023 CPRA amendments, any business collecting personal information from California residents must post a compliant privacy policy.\n\nPlease add a Privacy Policy page that includes:\n- Categories of personal information collected\n- How personal information is used\n- Consumer rights under CCPA/CPRA\n- Contact information for privacy requests\n\nLink it in the site footer. Please confirm when this has been updated."
+)
+
+WM_AB723 = _webmaster_email(
+    "Required: AB 723 Digitally Altered Image Disclosure",
+    "Hi,\n\nIf any property images on our website are virtually staged, digitally enhanced, or AI-generated, California AB 723 (Civil Code §1102.6e) requires a disclosure near those images.\n\nPlease add the following text near any altered property photos:\n'Photo(s) may be virtually staged or digitally enhanced.'\n\nPlease confirm when this has been updated."
+)
+
+WM_NMLS = _webmaster_email(
+    "URGENT: NMLS Number Missing from Website",
+    "Hi,\n\nOur website is missing the required NMLS identification number. Under the SAFE Act (12 U.S.C. §5102-5116) and NMLS Policy Guidebook §5.1, all mortgage advertising must include the individual MLO's NMLS ID and the company NMLS ID.\n\nPlease add to the site footer:\n\nNMLS #[INDIVIDUAL_ID]\n[Company Name] NMLS #[COMPANY_ID]\n\nPlease confirm when this has been updated."
+)
+
+WM_TILA = _webmaster_email(
+    "URGENT: TILA/Reg Z APR Disclosure Violation",
+    "Hi,\n\nOur website mentions specific interest rates, monthly payments, or loan terms without the required APR disclosure nearby. Under the Truth in Lending Act (15 U.S.C. §1601) and Regulation Z (12 CFR §1026.24), any 'triggering term' (specific rate, payment amount, or loan term) requires all related APR and loan terms to be disclosed in close proximity.\n\nPlease either:\n1. Add the APR immediately adjacent to any rate or payment mentioned, OR\n2. Remove the specific rate/payment figures\n\nPlease confirm when this has been updated."
+)
+
+WM_EHL = _webmaster_email(
+    "Required: Equal Housing Lender Statement Missing",
+    "Hi,\n\nOur website is missing the required 'Equal Housing Lender' statement. Under Regulation B (12 CFR §1002.4) implementing the Equal Credit Opportunity Act, all mortgage lender advertising must include this statement and/or the Equal Housing Lender logo.\n\nPlease add 'Equal Housing Lender' and the logo to the site footer.\n\nPlease confirm when this has been updated."
+)
+
+
+# ---------------------------------------------------------------------------
+# TILA / Reg Z check
+# ---------------------------------------------------------------------------
 def check_tila_proximity(text: str) -> RuleResult:
     """APR must appear within 400 chars of any TILA triggering term."""
     triggers = list(TILA_TRIGGER_RE.finditer(text))
     if not triggers:
         return RuleResult(
-            id="tila_apr", name="TILA/Reg Z – APR Proximity",
+            id="tila_apr", name="TILA/Reg Z — APR Proximity",
             status="skip",
-            description="No TILA triggering terms (rates/payments) found on page.",
-            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1026/"
+            description="No TILA triggering terms (rates, payments, or loan terms) found on page.",
+            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1026/24/",
+            regulation="12 CFR §1026.24(d) — If an advertisement for credit states a rate of finance charge, it shall state the rate as an 'annual percentage rate,' using that term. If the annual percentage rate may be increased after consummation, the advertisement shall state that fact."
         )
     for m in triggers:
         start = max(0, m.start() - TILA_WINDOW)
@@ -338,46 +397,59 @@ def check_tila_proximity(text: str) -> RuleResult:
         window = text[start:end]
         if TILA_APR_RE.search(window):
             return RuleResult(
-                id="tila_apr", name="TILA/Reg Z – APR Proximity",
+                id="tila_apr", name="TILA/Reg Z — APR Proximity",
                 status="pass",
-                description="APR appears near triggering term.",
-                source_url="https://www.consumerfinance.gov/rules-policy/regulations/1026/"
+                description="APR disclosure found near triggering term — compliant with Regulation Z.",
+                source_url="https://www.consumerfinance.gov/rules-policy/regulations/1026/24/",
+                regulation="12 CFR §1026.24(d) — Triggering terms require full APR disclosure in close proximity."
             )
     return RuleResult(
-        id="tila_apr", name="TILA/Reg Z – APR Proximity",
+        id="tila_apr", name="TILA/Reg Z — APR Proximity",
         status="fail",
         description="Triggering rate/payment terms found but APR not disclosed nearby.",
-        detail=f"Found triggering term: '{triggers[0].group()[:60]}' — no APR within {TILA_WINDOW} chars.",
-        source_url="https://www.consumerfinance.gov/rules-policy/regulations/1026/",
-        fix="Add 'APR' disclosure immediately adjacent to any specific rate or payment amount mentioned on the page."
+        detail=f"Found triggering term: '{triggers[0].group()[:60]}' — no APR within {TILA_WINDOW} characters.",
+        source_url="https://www.consumerfinance.gov/rules-policy/regulations/1026/24/",
+        regulation="12 CFR §1026.24(d) — 'If an advertisement for credit states a rate of finance charge, it shall state the rate as an annual percentage rate, using that term.' Additional triggering terms include: the amount or percentage of any downpayment, the number of payments or period of repayment, or the amount of any payment. When any triggering term is used, the advertisement must also state: (i) the amount or percentage of the downpayment, (ii) the terms of repayment, and (iii) the annual percentage rate.",
+        fix="Add the Annual Percentage Rate (APR) immediately adjacent to any specific interest rate, monthly payment, or loan term mentioned on the page. The APR must be displayed at least as prominently as the triggering term. If the rate is variable, state 'APR is variable and may increase after consummation.'",
+        webmaster_email=WM_TILA
     )
 
 
+# ---------------------------------------------------------------------------
+# Real Estate checks
+# ---------------------------------------------------------------------------
 def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
     results = []
 
     # 1. DRE license number
     if DRE_LICENSE_RE.search(text):
-        results.append(RuleResult("dre_license", "DRE License Number", "pass",
+        results.append(RuleResult("dre_license", "DRE License Number Display", "pass",
             "DRE license number found on page.",
-            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html"))
-    else:
-        results.append(RuleResult("dre_license", "DRE License Number", "fail",
-            "No DRE license number detected.",
-            detail="Your DRE license number must appear on every page of advertising.",
             source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
-            fix="Add your DRE license number (e.g. 'DRE #01234567') to your site footer so it appears on every page."))
-
-    # 2. Responsible broker
-    if RESPONSIBLE_BROKER_RE.search(text):
-        results.append(RuleResult("responsible_broker", "Responsible Broker Name", "pass",
-            "Responsible broker disclosure found.",
-            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html"))
+            regulation="California Business & Professions Code §10140.6 — 'A real estate licensee shall disclose his or her license identification number on all solicitation materials intended to be the first point of contact with consumers.' Commissioner's Regulation §2773 further requires the eight-digit license number on all advertising."))
     else:
-        results.append(RuleResult("responsible_broker", "Responsible Broker Name", "fail",
-            "No responsible/supervising broker identified.",
-            fix="Add 'Responsible Broker: [Full Name], DRE #XXXXXXX' to your footer.",
-            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html"))
+        results.append(RuleResult("dre_license", "DRE License Number Display", "fail",
+            "No DRE license number detected on this page.",
+            detail="California law requires your DRE license number (format: DRE #01234567) to appear on every page of advertising material, including your website.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="California Business & Professions Code §10140.6 — 'A real estate licensee shall disclose his or her license identification number on all solicitation materials intended to be the first point of contact with consumers and on all real property purchase agreements when acting as an agent.' Commissioner's Regulation §2773 requires the eight-digit DRE license number to appear on all advertising, including internet advertising.",
+            fix="Add your DRE license number to your website footer so it appears on every page. Use the format: 'DRE #01234567' or 'CalBRE #01234567'. The number must be your full 8-digit license number, not abbreviated.",
+            webmaster_email=WM_DRE_LICENSE))
+
+    # 2. Responsible broker disclosure
+    if RESPONSIBLE_BROKER_RE.search(text) or BROKER_DRE_RE.search(text):
+        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "pass",
+            "Responsible broker disclosure found.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="California Business & Professions Code §10159.5 — 'Every licensed salesperson shall have and be under a written agreement with the responsible broker.' Commissioner's Regulation §2773.1 — All advertising by or on behalf of a salesperson must include the identity of the responsible broker or the name of the employing brokerage firm."))
+    else:
+        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "fail",
+            "No responsible or supervising broker identified on this page.",
+            detail="If you are a salesperson (not a broker), your website must identify your supervising/responsible broker and their DRE license number.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="California Business & Professions Code §10159.5 — Salesperson advertising must include broker identity. Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.' The broker's name and DRE number must be reasonably prominent.",
+            fix="Add to your site footer: '[Your Name], DRE #[Your Number] | [Brokerage Name], DRE #[Broker Number]'. If you are a broker, this check may be a false positive — ensure your broker license number is displayed.",
+            webmaster_email=WM_RESPONSIBLE_BROKER))
 
     # 3. Equal Housing Opportunity
     has_text = bool(EQUAL_HOUSING_RE.search(text))
@@ -385,82 +457,150 @@ def run_realestate_checks(text: str, html: str) -> list[RuleResult]:
     if has_text or has_img:
         results.append(RuleResult("equal_housing", "Equal Housing Opportunity", "pass",
             "Equal Housing Opportunity logo or statement found.",
-            source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp"))
+            source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp/advertising_and_marketing",
+            regulation="Fair Housing Act (42 U.S.C. §3604(c)) — It is unlawful 'to make, print, or publish any notice, statement, or advertisement with respect to the sale or rental of a dwelling that indicates any preference, limitation, or discrimination based on race, color, religion, sex, handicap, familial status, or national origin.' HUD Advertising Guidelines (24 CFR Part 109) require the Equal Housing Opportunity logo or statement in all real estate advertising."))
     else:
         results.append(RuleResult("equal_housing", "Equal Housing Opportunity", "fail",
             "Equal Housing Opportunity logo or statement not found.",
-            fix="Display the Equal Housing Opportunity logo and/or statement on your site.",
-            source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp"))
+            detail="The Fair Housing Act and HUD advertising guidelines require all real estate advertising to include the Equal Housing Opportunity logo and/or the statement 'Equal Housing Opportunity.'",
+            source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp/advertising_and_marketing",
+            regulation="Fair Housing Act (42 U.S.C. §3604(c)) — Prohibits discriminatory advertising. HUD Advertising Guidelines (24 CFR Part 109.30) — 'All advertising of residential real estate for sale, rent, or financing should contain an equal housing opportunity logotype, statement, or slogan.' The logo must be of a size 'at least equal to the largest of other logotypes.'",
+            fix="Add the Equal Housing Opportunity logo and the words 'Equal Housing Opportunity' to your website footer. Download the official HUD logo from hud.gov. The logo should be clearly visible — not hidden or miniaturized.",
+            webmaster_email=WM_EQUAL_HOUSING))
 
-    # 4. Team name requires broker affiliation
+    # 4. Team advertising compliance
     if TEAM_NAME_RE.search(text):
-        has_affiliation = bool(re.search(r'(keller williams|compass|coldwell|century 21|sotheby|exp realty|berkshire|remax|better homes|@properties)', text, re.I))
-        if not has_affiliation and not RESPONSIBLE_BROKER_RE.search(text):
+        has_affiliation = bool(re.search(r'(keller williams|compass|coldwell|century 21|sotheby|exp realty|berkshire|remax|re/max|better homes|@properties|eXp|lyon|bhhs)', text, re.I))
+        if not has_affiliation and not RESPONSIBLE_BROKER_RE.search(text) and not BROKER_DRE_RE.search(text):
             results.append(RuleResult("team_advertising", "Team Advertising Compliance", "warn",
-                "Team name detected but broker affiliation may not be clear.",
-                detail="DRE requires team advertising to prominently display the responsible broker's name.",
-                fix="Ensure your broker's name and DRE# are displayed at least as prominently as your team name.",
-                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html"))
+                "Team name detected but broker affiliation may not be sufficiently prominent.",
+                detail="The DRE requires that when a team advertises, the responsible broker's name must be displayed at least as prominently as the team name.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="Commissioner's Regulation §2773.1 — 'The name of the broker shall appear in a manner that is at least as prominent as the name of the team or group in any advertising.' DRE RE 17 (Winter 2011/12) — Team names cannot imply the team is a separate licensed entity.",
+                fix="Ensure your broker's name and DRE license number are displayed at least as prominently as your team name. The broker name must appear in the same font size or larger, not buried in fine print."))
         else:
             results.append(RuleResult("team_advertising", "Team Advertising Compliance", "pass",
-                "Team name with broker affiliation found."))
+                "Team name with apparent broker affiliation found.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="Commissioner's Regulation §2773.1 — Broker identity must be at least as prominent as team name in advertising."))
     else:
         results.append(RuleResult("team_advertising", "Team Advertising Compliance", "skip",
-            "No team name detected — check skipped."))
+            "No team name detected on this page — check not applicable."))
 
-    # 5. AB 723 — altered image disclosure
+    # 5. AB 723 — digitally altered image disclosure
     has_photos = bool(re.search(r'<img ', html, re.I))
     if not has_photos:
-        results.append(RuleResult("ab723_images", "AB 723 – Altered Image Disclosure", "skip",
-            "No images detected on page."))
+        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "skip",
+            "No images detected on this page.",
+            source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723"))
     elif AB723_RE.search(text):
-        results.append(RuleResult("ab723_images", "AB 723 – Altered Image Disclosure", "pass",
+        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "pass",
             "Digitally altered image disclosure language found.",
-            source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723"))
+            source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723",
+            regulation="California AB 723 (2024), adding Civil Code §1102.6e — Requires disclosure when listing photographs have been 'digitally staged' or 'virtually staged or digitally altered or enhanced.' The disclosure must be 'in a conspicuous manner' near the affected image."))
     else:
-        results.append(RuleResult("ab723_images", "AB 723 – Altered Image Disclosure", "warn",
-            "Property images found but no AB 723 disclosure detected.",
-            detail="California AB 723 requires disclosure if listing images are virtually staged or digitally altered.",
-            fix="Add a disclosure near property photos: 'Photo(s) may be virtually staged or digitally enhanced.'",
-            source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723"))
+        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "warn",
+            "Property images found but no AB 723 disclosure language detected.",
+            detail="If any property images on this site are virtually staged, digitally enhanced, or AI-generated, California AB 723 requires a conspicuous disclosure.",
+            source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723",
+            regulation="California AB 723 (effective July 1, 2024), Civil Code §1102.6e — 'A listing that includes a photograph that has been digitally staged shall include a disclosure... that the photograph has been digitally staged.' Applies to virtual staging, AI-generated imagery, and significant digital alteration of property photos.",
+            fix="If any property photos are virtually staged or digitally altered, add this disclosure near those images: 'Photo(s) may be virtually staged or digitally enhanced.' The disclosure must be conspicuous — not hidden in fine print or buried at the bottom of the page.",
+            webmaster_email=WM_AB723))
 
-    # 6. Virtual office rules
+    # 6. Virtual office advertisement rules
     if VIRTUAL_OFFICE_RE.search(text):
         if DRE_LICENSE_RE.search(text):
-            results.append(RuleResult("virtual_office", "Virtual Office Advertisement Rules", "pass",
-                "VOA with DRE license — appears compliant.",
-                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html"))
+            results.append(RuleResult("virtual_office", "Virtual Office Advertisement (VOA) Rules", "pass",
+                "Virtual office with DRE license — appears compliant.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="Commissioner's Regulation §2770.1 — Virtual Office Advertisements (VOAs) must comply with the same advertising rules as traditional advertising, including display of the responsible broker's name and license number."))
         else:
-            results.append(RuleResult("virtual_office", "Virtual Office Advertisement Rules", "fail",
-                "Virtual office reference without DRE license number.",
-                fix="Virtual office advertisements require your DRE license number.",
-                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html"))
+            results.append(RuleResult("virtual_office", "Virtual Office Advertisement (VOA) Rules", "fail",
+                "Virtual office reference found without DRE license number.",
+                detail="All virtual office websites must identify the responsible broker and display DRE license numbers, just like physical office advertising.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="Commissioner's Regulation §2770.1 — VOA operators must display the responsible broker's name, license number, and comply with all other advertising regulations under §2773.",
+                fix="Add your DRE license number and broker information to the virtual office page."))
 
     # 7. CCPA privacy policy
-    if CCPA_RE.search(text):
-        results.append(RuleResult("ccpa_privacy", "CCPA Privacy Policy", "pass",
-            "Privacy policy link or CCPA language found.",
-            source_url="https://oag.ca.gov/privacy/ccpa"))
+    has_privacy = CCPA_RE.search(text)
+    has_dns     = DO_NOT_SELL_RE.search(text)
+    if has_privacy:
+        if has_dns:
+            results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "pass",
+                "Privacy policy and 'Do Not Sell' language found.",
+                source_url="https://oag.ca.gov/privacy/ccpa",
+                regulation="California Consumer Privacy Act (Civil Code §1798.100-199), amended by CPRA (2023) — Businesses collecting personal information from California residents must provide a privacy policy disclosing categories of information collected, purposes, and consumer rights. §1798.120 requires a 'Do Not Sell or Share My Personal Information' link."))
+        else:
+            results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "warn",
+                "Privacy policy found, but no 'Do Not Sell or Share' link detected.",
+                detail="If you sell or share personal information, CCPA/CPRA requires a conspicuous 'Do Not Sell or Share My Personal Information' link.",
+                source_url="https://oag.ca.gov/privacy/ccpa",
+                regulation="California Civil Code §1798.120(a) — 'A consumer shall have the right, at any time, to direct a business that sells or shares personal information about the consumer to third parties not to sell or share the consumer's personal information.' §1798.135 requires a 'clear and conspicuous link' titled 'Do Not Sell or Share My Personal Information.'",
+                fix="Add a 'Do Not Sell or Share My Personal Information' link to your footer if you share any user data with third parties (including analytics, advertising, or lead generation services). If you use Google Analytics, Facebook Pixel, or similar tools, you likely need this link."))
     else:
-        results.append(RuleResult("ccpa_privacy", "CCPA Privacy Policy", "fail",
-            "No privacy policy detected.",
-            fix="Add a Privacy Policy page and link it in your footer. Include CCPA-required disclosures.",
-            source_url="https://oag.ca.gov/privacy/ccpa"))
+        results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "fail",
+            "No privacy policy detected on this page.",
+            detail="Any website collecting personal information (contact forms, email signups, cookies) from California residents must have a CCPA-compliant privacy policy.",
+            source_url="https://oag.ca.gov/privacy/ccpa",
+            regulation="California Consumer Privacy Act (Civil Code §1798.100) — 'A business that collects a consumer's personal information shall, at or before the point of collection, inform consumers as to the categories of personal information to be collected and the purposes for which the categories of personal information are collected or used.' Failure to post a privacy policy can result in fines of $2,500 per unintentional violation or $7,500 per intentional violation.",
+            fix="Create a Privacy Policy page and link it in your website footer. The policy must include: (1) categories of personal information collected, (2) how it's used, (3) whether it's sold or shared, (4) consumer rights under CCPA/CPRA, and (5) contact information for privacy requests. Consider using a CCPA-compliant template from your legal provider.",
+            webmaster_email=WM_CCPA))
 
-    # 8. Contact info
+    # 8. Contact information
     has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
     has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I))
-    if has_phone or has_email:
+    has_addr  = bool(PHYSICAL_ADDR_RE.search(text))
+    if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
-            "Phone or email contact found on page."))
-    else:
+            "Phone and email contact found on page.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="DRE Advertising Guidelines and Business & Professions Code §10159.5 — The public should be able to identify and contact the responsible licensee from any advertising."))
+    elif has_phone or has_email:
         results.append(RuleResult("contact_info", "Contact Information", "warn",
-            "No phone number or email address detected.",
-            fix="Ensure your contact information is visible on the page."))
+            f"{'Phone number' if has_phone else 'Email address'} found, but {'email' if has_phone else 'phone number'} not detected.",
+            fix="Add both a phone number and email address to your website for consumer accessibility.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="DRE best practices recommend multiple contact methods be available."))
+    else:
+        results.append(RuleResult("contact_info", "Contact Information", "fail",
+            "No phone number or email address detected on this page.",
+            fix="Add your phone number and email address to the website, ideally in the header or footer so they appear on every page.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="DRE Advertising Guidelines — Consumers must be able to identify and contact the responsible licensee. Business & Professions Code §10159.5 requires advertised contact information to lead to the responsible broker."))
+
+    # 9. Physical / mailing address
+    if has_addr:
+        results.append(RuleResult("physical_address", "Physical Business Address", "pass",
+            "Physical address detected on page.",
+            regulation="Business & Professions Code §10162 — DRE licensees must maintain a definite place of business. Displaying your office address adds trust and is recommended by DRE guidelines."))
+    else:
+        results.append(RuleResult("physical_address", "Physical Business Address", "warn",
+            "No physical business address detected.",
+            detail="While not strictly required on a website, displaying your office address builds consumer trust and aligns with DRE's requirement to maintain a definite place of business.",
+            fix="Consider adding your office address to the footer. A P.O. Box alone may be insufficient for some DRE contexts.",
+            regulation="Business & Professions Code §10162 — Licensees must maintain a definite place of business. Displaying the address on advertising is best practice."))
+
+    # 10. ADA accessibility
+    if ADA_RE.search(text):
+        results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "pass",
+            "Accessibility statement or compliance language found.",
+            source_url="https://www.ada.gov/resources/web-guidance/",
+            regulation="Americans with Disabilities Act, Title III (42 U.S.C. §12182) — Public accommodations, which courts have interpreted to include websites, must be accessible to individuals with disabilities. DOJ guidance (March 2022) confirms websites must be accessible."))
+    else:
+        results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "warn",
+            "No accessibility statement detected on this page.",
+            detail="While not a DRE requirement, the ADA requires websites of public accommodations to be accessible. NAR recommends all REALTOR websites include an accessibility statement.",
+            source_url="https://www.ada.gov/resources/web-guidance/",
+            regulation="ADA Title III (42 U.S.C. §12182) — Websites of public accommodations must be accessible. NAR Accessibility Best Practices (2023) recommend an accessibility statement and WCAG 2.1 AA conformance.",
+            fix="Add an accessibility statement page linked from your footer. State your commitment to accessibility and provide a way for users to report issues. Consider a WCAG 2.1 AA audit of your site."))
 
     return results
 
 
+# ---------------------------------------------------------------------------
+# Lending / MLO checks
+# ---------------------------------------------------------------------------
 def run_lending_checks(text: str, html: str) -> list[RuleResult]:
     results = []
 
@@ -469,69 +609,144 @@ def run_lending_checks(text: str, html: str) -> list[RuleResult]:
 
     # 2. NMLS number
     if NMLS_RE.search(text):
-        results.append(RuleResult("safe_nmls", "SAFE Act – NMLS Number", "pass",
+        results.append(RuleResult("safe_nmls", "SAFE Act — NMLS Number Display", "pass",
             "NMLS number found on page.",
-            source_url="https://mortgage.nationwidelicensingsystem.org/"))
+            source_url="https://mortgage.nationwidelicensingsystem.org/about/policies/Pages/NMLSPolicyGuidebook.aspx",
+            regulation="SAFE Act (12 U.S.C. §5102-5116, §5103(3)) — 'The term \"unique identifier\" means a number or other identifier that... is assigned by the Nationwide Mortgage Licensing System.' NMLS Policy Guidebook §5.1 — 'Each individual and company must display their NMLS Unique Identifier on all residential mortgage loan advertising.'"))
     else:
-        results.append(RuleResult("safe_nmls", "SAFE Act – NMLS Number", "fail",
-            "No NMLS number detected.",
-            fix="Add your NMLS ID (e.g. 'NMLS #276626') to your footer on every page.",
-            source_url="https://mortgage.nationwidelicensingsystem.org/"))
+        results.append(RuleResult("safe_nmls", "SAFE Act — NMLS Number Display", "fail",
+            "No NMLS identification number detected on this page.",
+            detail="The SAFE Act requires every mortgage loan originator to display their NMLS Unique Identifier on all advertising materials, including websites.",
+            source_url="https://mortgage.nationwidelicensingsystem.org/about/policies/Pages/NMLSPolicyGuidebook.aspx",
+            regulation="SAFE Act (12 U.S.C. §5103(3)) — Definition of unique identifier. 12 U.S.C. §5105(a)(1) — 'Each mortgage originator shall... furnish his or her unique identifier.' NMLS Policy Guidebook §5.1 — 'Each individual and company must display their NMLS Unique Identifier on all residential mortgage loan advertising, including business cards, websites, and all other advertising.'",
+            fix="Add your individual NMLS ID and your company's NMLS ID to your website footer so they appear on every page. Use the format: 'NMLS #123456'. Both your personal NMLS ID and your company's NMLS ID must be displayed.",
+            webmaster_email=WM_NMLS))
 
-    # 3. Equal Housing Lender
+    # 3. DRE license (MLOs in CA also need DRE)
+    if DRE_LICENSE_RE.search(text):
+        results.append(RuleResult("dre_license_mlo", "DRE License Number (MLO)", "pass",
+            "DRE license number found — required for CA-licensed MLOs.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="California Business & Professions Code §10140.6 — MLOs licensed through DRE must display their DRE license number in addition to their NMLS ID."))
+    else:
+        results.append(RuleResult("dre_license_mlo", "DRE License Number (MLO)", "warn",
+            "No DRE license number detected. If you are DRE-licensed (not DFPI-licensed), your DRE number is required.",
+            detail="California MLOs licensed through DRE must display both their DRE license number and NMLS ID.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="Business & Professions Code §10140.6 — DRE-licensed MLOs must include their license number on all advertising.",
+            fix="If you are DRE-licensed, add your DRE license number (e.g. 'DRE #01234567') to your footer alongside your NMLS ID. If you are DFPI-licensed only, this check does not apply to you."))
+
+    # 4. Equal Housing Lender
     has_lender = bool(re.search(r'equal\s+housing\s+lender', text, re.I))
     has_img    = bool(EHO_IMG_RE.search(html))
     if has_lender or has_img:
-        results.append(RuleResult("equal_housing_lender", "Equal Housing Lender", "pass",
+        results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "pass",
             "Equal Housing Lender statement or logo found.",
-            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/"))
+            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/4/",
+            regulation="Regulation B (12 CFR §1002.4(b)), implementing the Equal Credit Opportunity Act (15 U.S.C. §1691) — 'A creditor that advertises credit shall include in each advertisement a statement of the creditor's compliance with the Equal Credit Opportunity Act.' For mortgage lenders, this means displaying 'Equal Housing Lender' and the Equal Housing logo."))
     else:
-        results.append(RuleResult("equal_housing_lender", "Equal Housing Lender", "fail",
-            "Equal Housing Lender statement or logo not found.",
-            fix="Display 'Equal Housing Lender' and the Equal Housing logo on your site.",
-            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/"))
+        results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "fail",
+            "'Equal Housing Lender' statement or logo not found on this page.",
+            detail="Mortgage lender advertising must include 'Equal Housing Lender' (not just 'Equal Housing Opportunity'). This is a separate requirement under Regulation B / ECOA.",
+            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/4/",
+            regulation="Regulation B (12 CFR §1002.4(b)) — 'A creditor shall provide the appropriate notice to an applicant.' For advertising, creditors must include: 'Equal Housing Lender' or the Equal Housing Lender logo. The Federal Reserve Board's Official Staff Commentary confirms this applies to all forms of advertising, including internet advertising.",
+            fix="Display the words 'Equal Housing Lender' and the Equal Housing Lender logo in your website footer. Note: 'Equal Housing Opportunity' alone is not sufficient for mortgage lenders — you must specifically use 'Equal Housing Lender.'",
+            webmaster_email=WM_EHL))
 
-    # 4. CCPA
-    if CCPA_RE.search(text):
-        results.append(RuleResult("ccpa_privacy", "CCPA Privacy Policy", "pass",
-            "Privacy policy found.",
-            source_url="https://oag.ca.gov/privacy/ccpa"))
+    # 5. CCPA privacy policy
+    has_privacy = CCPA_RE.search(text)
+    has_dns     = DO_NOT_SELL_RE.search(text)
+    if has_privacy:
+        if has_dns:
+            results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "pass",
+                "Privacy policy and 'Do Not Sell' language found.",
+                source_url="https://oag.ca.gov/privacy/ccpa",
+                regulation="California Consumer Privacy Act (Civil Code §1798.100-199), as amended by CPRA — Full compliance detected."))
+        else:
+            results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "warn",
+                "Privacy policy found, but no 'Do Not Sell or Share' link detected.",
+                source_url="https://oag.ca.gov/privacy/ccpa",
+                regulation="Civil Code §1798.120(a) & §1798.135 — If you sell or share personal information, a 'Do Not Sell or Share My Personal Information' link is required.",
+                fix="Add a 'Do Not Sell or Share My Personal Information' link to your footer if you share any user data with third parties."))
     else:
-        results.append(RuleResult("ccpa_privacy", "CCPA Privacy Policy", "fail",
-            "No privacy policy detected.",
-            fix="Add a Privacy Policy with CCPA disclosures.",
-            source_url="https://oag.ca.gov/privacy/ccpa"))
+        results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "fail",
+            "No privacy policy detected on this page.",
+            detail="Mortgage businesses collecting personal information (loan applications, contact forms, etc.) must have a CCPA-compliant privacy policy. Penalties are $2,500 per unintentional violation, $7,500 per intentional violation.",
+            source_url="https://oag.ca.gov/privacy/ccpa",
+            regulation="California Consumer Privacy Act (Civil Code §1798.100) — 'A business that collects a consumer's personal information shall, at or before the point of collection, inform consumers as to the categories of personal information to be collected and the purposes for which the categories of personal information are collected or used.'",
+            fix="Create a comprehensive Privacy Policy page linked from your footer. For mortgage businesses, also ensure Gramm-Leach-Bliley Act (GLBA) privacy notice requirements are met.",
+            webmaster_email=WM_CCPA))
 
-    # 5. DFPI prohibited claims
+    # 6. DFPI prohibited claims
     prohibited = re.compile(
-        r'\b(guaranteed\s+approv|no\s+credit\s+check|instant\s+approv|always\s+approv|100%\s+financ)\b', re.I
+        r'\b(guaranteed\s+approv|no\s+credit\s+check|instant\s+approv|always\s+approv|100%\s+financ|no\s+money\s+down\s+mortgage|pre.?approved\s+for\s+any)\b', re.I
     )
     hit = prohibited.search(text)
     if hit:
-        results.append(RuleResult("dfpi_prohibited", "DFPI – Prohibited Claims", "fail",
-            "Potentially prohibited claim detected.",
-            detail=f"Found: '{hit.group()[:80]}'",
-            fix="Remove or rewrite claims like 'guaranteed approval' or 'no credit check' — these violate DFPI advertising rules.",
-            source_url="https://dfpi.ca.gov/"))
+        results.append(RuleResult("dfpi_prohibited", "DFPI — Prohibited Advertising Claims", "fail",
+            "Potentially prohibited advertising claim detected.",
+            detail=f"Found: '{hit.group()[:80]}'. DFPI prohibits misleading claims in mortgage advertising, including guarantees of approval, claims of no credit checks, and similar language.",
+            source_url="https://dfpi.ca.gov/licensees/mortgage-lending/advertising/",
+            regulation="California Financial Code §22161 — 'No licensee shall make, publish, disseminate, circulate, or place before the public an advertisement or marketing material that includes any false, misleading, or deceptive statement or representation.' DFPI Advertising Guidelines specifically prohibit: (1) Claims of guaranteed approval, (2) 'No credit check' claims, (3) Claims of instant or automatic approval, (4) Any claim that implies all applicants will be approved regardless of creditworthiness.",
+            fix=f"Remove or rewrite the phrase '{hit.group()[:60]}'. Replace with compliant language. For example, instead of 'guaranteed approval,' use 'subject to credit approval and underwriting guidelines.' Instead of 'no credit check,' explain your actual underwriting process honestly."))
     else:
-        results.append(RuleResult("dfpi_prohibited", "DFPI – Prohibited Claims", "pass",
+        results.append(RuleResult("dfpi_prohibited", "DFPI — Prohibited Advertising Claims", "pass",
             "No prohibited DFPI advertising claims detected.",
-            source_url="https://dfpi.ca.gov/"))
+            source_url="https://dfpi.ca.gov/licensees/mortgage-lending/advertising/",
+            regulation="California Financial Code §22161 — Advertising must not be false, misleading, or deceptive. No prohibited terms detected."))
 
-    # 6. ADA accessibility signal
+    # 7. Contact information
+    has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
+    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I))
+    if has_phone and has_email:
+        results.append(RuleResult("contact_info", "Contact Information", "pass",
+            "Phone and email contact found on page.",
+            regulation="NMLS Policy Guidebook and SAFE Act best practices — Consumers should be able to reach the licensed MLO directly."))
+    elif has_phone or has_email:
+        results.append(RuleResult("contact_info", "Contact Information", "warn",
+            f"{'Phone' if has_phone else 'Email'} found, but {'email' if has_phone else 'phone'} not detected.",
+            fix="Add both a phone number and email address for consumer contact.",
+            regulation="Best practice — Multiple contact methods increase consumer trust and accessibility."))
+    else:
+        results.append(RuleResult("contact_info", "Contact Information", "fail",
+            "No phone number or email address detected.",
+            fix="Add your phone number and email address to the website footer.",
+            regulation="SAFE Act and NMLS best practices require consumers to be able to contact the licensed MLO."))
+
+    # 8. ADA accessibility
     if ADA_RE.search(text):
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "pass",
-            "Accessibility statement or compliance language found."))
+            "Accessibility statement or compliance language found.",
+            source_url="https://www.ada.gov/resources/web-guidance/",
+            regulation="ADA Title III (42 U.S.C. §12182) — Websites of public accommodations must be accessible to individuals with disabilities."))
     else:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "warn",
             "No accessibility statement detected.",
-            fix="Add an accessibility statement and consider an ADA compliance review."))
+            detail="The ADA requires websites of public accommodations (which includes financial services) to be accessible. CFPB has also emphasized digital accessibility for mortgage servicers.",
+            source_url="https://www.ada.gov/resources/web-guidance/",
+            regulation="ADA Title III (42 U.S.C. §12182) — Public accommodations must be accessible. CFPB has issued guidance on digital accessibility for financial services websites.",
+            fix="Add an accessibility statement page linked from your footer. Consider a WCAG 2.1 AA audit."))
+
+    # 9. NMLS Consumer Access link
+    has_consumer_access = bool(re.search(r'nmlsconsumeraccess|consumer\s*access', text, re.I))
+    if has_consumer_access:
+        results.append(RuleResult("nmls_consumer_access", "NMLS Consumer Access Link", "pass",
+            "Link to NMLS Consumer Access found.",
+            source_url="https://www.nmlsconsumeraccess.org/",
+            regulation="NMLS Policy Guidebook §5.1 — Recommended best practice to link to NMLS Consumer Access (nmlsconsumeraccess.org) so consumers can verify licensee status."))
+    else:
+        results.append(RuleResult("nmls_consumer_access", "NMLS Consumer Access Link", "warn",
+            "No link to NMLS Consumer Access detected.",
+            detail="Best practice is to link to nmlsconsumeraccess.org so consumers can verify your license status. Some states require this link.",
+            source_url="https://www.nmlsconsumeraccess.org/",
+            regulation="NMLS Policy Guidebook §5.1 — 'Licensees are encouraged to include a link to NMLS Consumer Access on their website.' Some states (e.g., Texas, New York) explicitly require this link.",
+            fix="Add a link to https://www.nmlsconsumeraccess.org in your footer, labeled 'NMLS Consumer Access' or 'Verify My License.'"))
 
     return results
 
 
 def score_results(results: list[RuleResult]) -> int:
-    """Calculate 0-100 compliance score."""
+    """Calculate 0-100 compliance score with weighted severity."""
     scorable = [r for r in results if r.status != "skip"]
     if not scorable:
         return 100
