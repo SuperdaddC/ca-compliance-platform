@@ -131,7 +131,6 @@ export default function Landing() {
       <footer className="bg-brand-blue text-white py-10 px-4 text-center text-sm">
         <p className="font-semibold">The Colyer Team</p>
         <p className="text-blue-300 mt-1">Michael Colyer, NMLS #276626, DRE #01842442</p>
-        <p className="text-blue-300">DRE Broker #01526140</p>
         <p className="text-blue-300">2214 Faraday Ave, Carlsbad, CA 92008 · <a href="tel:6502888170" className="text-blue-300 hover:text-white">(650) 288-8170</a> · <a href="mailto:mike@thecolyerteam.com" className="text-blue-300 hover:text-white">mike@thecolyerteam.com</a></p>
         <div className="flex flex-wrap justify-center gap-4 mt-4 text-xs text-blue-400">
           <button onClick={() => setShowPrivacy(true)} className="hover:text-white underline bg-transparent border-0 cursor-pointer text-blue-400 text-xs">Privacy Policy</button>

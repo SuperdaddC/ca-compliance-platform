@@ -163,7 +163,7 @@ function buildFreeEmail(data: ScanEmailData): { subject: string; html: string } 
         — Built by a California DRE Broker
       </p>
       <p style="margin: 8px 0 0; font-size: 11px; color: #d1d5db;">
-        The Colyer Team · DRE #01526140
+        The Colyer Team
       </p>
     </div>
   </div>
@@ -273,7 +273,7 @@ function buildPaidEmail(data: ScanEmailData): { subject: string; html: string } 
         — Built by a California DRE Broker
       </p>
       <p style="margin: 8px 0 0; font-size: 11px; color: #d1d5db;">
-        The Colyer Team · DRE #01526140
+        The Colyer Team
       </p>
     </div>
   </div>
@@ -469,7 +469,7 @@ function buildCourtesyEmail(data: CourtesyEmailData): { subject: string; html: s
         — Built by a California DRE Broker
       </p>
       <p style="margin: 8px 0 0; font-size: 11px; color: #d1d5db;">
-        The Colyer Team · DRE #01526140
+        The Colyer Team
       </p>
     </div>
   </div>
