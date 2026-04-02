@@ -401,17 +401,18 @@ BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*#?\s*\d{7,9}\b
 NMLS_RE        = re.compile(r'\bnmls\s*#?\s*\d{4,10}\b', re.I)
 EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s*(opportunity|lender|logo)?', re.I)
 EHO_IMG_RE     = re.compile(r'(equal[_\-.\s]?housing|eho[_\-.]?(logo|icon|badge|seal)?\.?(png|svg|jpg|gif|webp)?|fair[_\-.\s]?housing|equal[_\-.\s]?opportunity)', re.I)
-CCPA_RE        = re.compile(r'privacy\s+policy|ccpa|do\s+not\s+sell', re.I)
+CCPA_RE        = re.compile(r'privacy\s+(policy|notice|statement|and\s+terms|&\s+terms)|ccpa|do\s+not\s+sell', re.I)
 DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
 ADA_RE         = re.compile(r'accessibility\s+(statement|policy|commitment|pledge|notice)|ada\s+complian|wcag|section\s+508|web\s+accessibility', re.I)
 PHYSICAL_ADDR_RE = re.compile(r'\b\d{2,5}\s+[A-Z][a-z]+.*?(ave|st|blvd|dr|rd|ln|ct|way|pkwy|pl|cir)\b', re.I)
 
 # TILA
 TILA_TRIGGER_RE = re.compile(
-    r'(\d+\.?\d*\s*%\s*(interest|rate|fixed|variable|arm)'
+    r'(\d+\.?\d*\s*%\s*(interest|rate|fixed|variable|arm|apr)'
     r'|\$[\d,]+\.?\d*\s*(per\s+month|\/mo|monthly\s+payment)'
     r'|\d+\s*-?\s*year\s+(fixed|arm|loan|mortgage)'
-    r'|(fixed|variable)\s+rate)',
+    r'|\d+\.?\d*\s*%\s+(fixed|variable)\s+rate'
+    r'|\d+\s*%\s+down\s*payment)',
     re.I
 )
 TILA_APR_RE = re.compile(r'\bapr\b', re.I)
@@ -764,10 +765,14 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
             fix="If you are DRE-licensed, add your DRE license number (e.g. 'DRE #01234567') to your footer alongside your NMLS ID. If you are DFPI-licensed only, this check does not apply to you."))
 
     # 4. Equal Housing Lender
+    #    IMPORTANT: For lending, we need "Equal Housing LENDER" specifically.
+    #    "Equal Housing Opportunity" alone is NOT sufficient for mortgage lenders.
+    #    The EHO DOM signals and image regex match both — so we filter here.
     has_lender = bool(re.search(r'equal\s+housing\s+lender', text, re.I))
-    has_img    = bool(EHO_IMG_RE.search(html))
-    has_dom    = bool(eho_signals)  # detected via DOM query in scraper
-    if has_lender or has_img or has_dom:
+    # Only count EHO images/DOM signals if they specifically reference "lender"
+    has_lender_img = bool(re.search(r'equal[_\-.\s]?housing[_\-.\s]?lender', html, re.I))
+    has_lender_dom = any('lender' in s.lower() for s in (eho_signals or []))
+    if has_lender or has_lender_img or has_lender_dom:
         results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "pass",
             "Equal Housing Lender statement or logo found.",
             source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/4/",
@@ -781,9 +786,12 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
             fix="Display the words 'Equal Housing Lender' and the Equal Housing Lender logo in your website footer. Note: 'Equal Housing Opportunity' alone is not sufficient for mortgage lenders — you must specifically use 'Equal Housing Lender.'",
             webmaster_email=WM_EHL))
 
-    # 5. CCPA privacy policy
-    has_privacy = CCPA_RE.search(text)
-    has_dns     = DO_NOT_SELL_RE.search(text)
+    # 5. CCPA privacy policy  (search both text AND HTML links, like realestate version)
+    has_privacy = CCPA_RE.search(text) or \
+                  bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
+                  bool(re.search(r'href=["\'][^"\']*privacy[^"\']*["\']', html, re.I))
+    has_dns     = DO_NOT_SELL_RE.search(text) or \
+                  bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
     if has_privacy:
         if has_dns:
             results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "pass",
@@ -823,9 +831,12 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
             source_url="https://dfpi.ca.gov/licensees/mortgage-lending/advertising/",
             regulation="California Financial Code §22161 — Advertising must not be false, misleading, or deceptive. No prohibited terms detected."))
 
-    # 7. Contact information
+    # 7. Contact information  (check HTML mailto: links and contact page links too)
     has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
-    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I))
+    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I)) or \
+                bool(re.search(r'mailto:[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', html, re.I)) or \
+                bool(re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us|send\s+(a\s+)?message|get\s+in\s+touch|reach\s+(out|us)', text, re.I)) or \
+                bool(re.search(r'href=["\'][^"\']*(/contact|/email|/reach-out|/get-in-touch|/message)[^"\']*["\']', html, re.I))
     if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
             "Phone and email contact found on page.",
