@@ -713,7 +713,8 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> lis
     has_ada_text = bool(ADA_RE.search(text))
     # Check for common accessibility widget scripts (UserWay, accessiBe, AudioEye, EqualWeb, etc.)
     has_ada_widget = bool(re.search(r'userway|accessibe|audioeye|equalweb|accessibilitywidget|ada\.compliance|accesswidget', html, re.I))
-    if has_ada_text or has_ada_widget:
+    has_ada_link = bool(re.search(r'href=["\'][^"\']*(/accessibility|/ada)[^"\']*["\']', html, re.I))
+    if has_ada_text or has_ada_widget or has_ada_link:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "pass",
             "Accessibility statement or compliance tool found.",
             source_url="https://www.ada.gov/resources/web-guidance/",
@@ -858,7 +859,8 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
     # 8. ADA accessibility
     has_ada_text = bool(ADA_RE.search(text))
     has_ada_widget = bool(re.search(r'userway|accessibe|audioeye|equalweb|accessibilitywidget|ada\.compliance|accesswidget', html, re.I))
-    if has_ada_text or has_ada_widget:
+    has_ada_link = bool(re.search(r'href=["\'][^"\']*(/accessibility|/ada)[^"\']*["\']', html, re.I))
+    if has_ada_text or has_ada_widget or has_ada_link:
         results.append(RuleResult("ada_accessibility", "ADA Accessibility Statement", "pass",
             "Accessibility statement or compliance tool found.",
             source_url="https://www.ada.gov/resources/web-guidance/",
