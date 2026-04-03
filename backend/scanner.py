@@ -325,6 +325,11 @@ async def scrape_website(url: str) -> dict:
                         raise ValueError(f"blocked: bot protection on {url} requires human verification (likely Imperva/PerimeterX)")
 
             # Scroll to trigger lazy-loaded footer content (where disclosures often live)
+            # Two-pass scroll: some frameworks (KW, Squarespace, IDX) load footer
+            # content lazily and need a second scroll after initial content loads.
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(2000)
+            # Second scroll in case page height changed after lazy content loaded
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1500)
 
@@ -405,6 +410,49 @@ CCPA_RE        = re.compile(r'privacy\s+(policy|notice|statement|and\s+terms|&\s
 DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
 ADA_RE         = re.compile(r'accessibility\s+(statement|policy|commitment|pledge|notice)|ada\s+complian|wcag|section\s+508|web\s+accessibility', re.I)
 PHYSICAL_ADDR_RE = re.compile(r'\b\d{2,5}\s+[A-Z][a-z]+.*?(ave|st|blvd|dr|rd|ln|ct|way|pkwy|pl|cir)\b', re.I)
+
+# Placeholder / template emails that should not count as real contact info
+PLACEHOLDER_EMAIL_RE = re.compile(
+    r'\b(user@domain\.com|email@example\.com|name@company\.com|'
+    r'your@email\.com|info@example\.com|test@test\.com|'
+    r'example@example\.com|admin@example\.com|'
+    r'noreply@|no-reply@|donotreply@|'
+    r'[a-z]+@sentry\.io|[a-z]+@placeholder\.)\b', re.I)
+
+
+_EXTERNAL_PRIVACY_DOMAINS = re.compile(
+    r'google\.com|gstatic\.com|googleapis\.com|facebook\.com|meta\.com|'
+    r'twitter\.com|cloudflare\.com|cookiebot\.com|onetrust\.com', re.I)
+
+
+def _has_own_privacy_link(html_str: str) -> bool:
+    """Check for privacy links that belong to the site, not third-party widgets."""
+    for m in re.finditer(r'href=["\']([^"\']*privacy[^"\']*)["\']', html_str, re.I):
+        href = m.group(1)
+        if not _EXTERNAL_PRIVACY_DOMAINS.search(href):
+            return True
+    return False
+
+
+def _has_real_email(text: str, html: str) -> bool:
+    """Check for a real email address, filtering out placeholders and template defaults."""
+    # Find all emails in text
+    emails_in_text = re.findall(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I)
+    real_text_emails = [e for e in emails_in_text if not PLACEHOLDER_EMAIL_RE.search(e)]
+    if real_text_emails:
+        return True
+    # Check mailto: links in HTML
+    mailto_emails = re.findall(r'mailto:([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})', html, re.I)
+    real_mailto = [e for e in mailto_emails if not PLACEHOLDER_EMAIL_RE.search(e)]
+    if real_mailto:
+        return True
+    # Check for contact form / "email us" language
+    if re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us|send\s+(a\s+)?message|get\s+in\s+touch|reach\s+(out|us)', text, re.I):
+        return True
+    if re.search(r'href=["\'][^"\']*(/contact|/email|/reach-out|/get-in-touch|/message)[^"\']*["\']', html, re.I):
+        return True
+    return False
+
 
 # TILA
 TILA_TRIGGER_RE = re.compile(
@@ -644,9 +692,10 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> lis
                 fix="Add your DRE license number and broker information to the virtual office page."))
 
     # 7. CCPA privacy policy (check both text and HTML for links/anchors)
+    #    Filter out external privacy links (Google reCAPTCHA, third-party widgets)
     has_privacy = CCPA_RE.search(text) or \
                   bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
-                  bool(re.search(r'href=["\'][^"\']*privacy[^"\']*["\']', html, re.I))
+                  _has_own_privacy_link(html)
     has_dns     = DO_NOT_SELL_RE.search(text) or \
                   bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
     if has_privacy:
@@ -673,11 +722,7 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> lis
 
     # 8. Contact information
     has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
-    # Check for email in text AND in mailto: links in the raw HTML
-    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I)) or \
-                bool(re.search(r'mailto:[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', html, re.I)) or \
-                bool(re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us|send\s+(a\s+)?message|get\s+in\s+touch|reach\s+(out|us)', text, re.I)) or \
-                bool(re.search(r'href=["\'][^"\']*(/contact|/email|/reach-out|/get-in-touch|/message)[^"\']*["\']', html, re.I))
+    has_email = _has_real_email(text, html)
     has_addr  = bool(PHYSICAL_ADDR_RE.search(text))
     if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
@@ -776,11 +821,24 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
     # Only count EHO images/DOM signals if they specifically reference "lender"
     has_lender_img = bool(re.search(r'equal[_\-.\s]?housing[_\-.\s]?lender', html, re.I))
     has_lender_dom = any('lender' in s.lower() for s in (eho_signals or []))
+    # Check if "Equal Housing Opportunity" (the RE variant) is present instead
+    has_eho_opportunity = bool(re.search(r'equal\s+housing\s+opportunity', text, re.I)) or \
+                          bool(re.search(r'equal\s+housing', text, re.I)) or \
+                          bool(re.search(r'fair\s+housing', text, re.I)) or \
+                          bool(re.search(r'equal[_\-.\s]?housing', html, re.I))
     if has_lender or has_lender_img or has_lender_dom:
         results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "pass",
             "Equal Housing Lender statement or logo found.",
             source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/4/",
             regulation="Regulation B (12 CFR §1002.4(b)), implementing the Equal Credit Opportunity Act (15 U.S.C. §1691) — 'A creditor that advertises credit shall include in each advertisement a statement of the creditor's compliance with the Equal Credit Opportunity Act.' For mortgage lenders, this means displaying 'Equal Housing Lender' and the Equal Housing logo."))
+    elif has_eho_opportunity:
+        # Site has a fair housing statement but uses "Opportunity" instead of "Lender"
+        results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "warn",
+            "'Equal Housing Opportunity' found, but mortgage lenders should use 'Equal Housing Lender' specifically.",
+            detail="Your site displays a fair housing statement, but Regulation B requires mortgage lenders to use the specific phrase 'Equal Housing Lender' rather than 'Equal Housing Opportunity'.",
+            source_url="https://www.consumerfinance.gov/rules-policy/regulations/1002/4/",
+            regulation="Regulation B (12 CFR §1002.4(b)) — Mortgage lenders must use 'Equal Housing Lender' specifically. 'Equal Housing Opportunity' is for real estate agents under the Fair Housing Act.",
+            fix="Change 'Equal Housing Opportunity' to 'Equal Housing Lender' in your footer. Consider also adding the Equal Housing Lender logo."))
     else:
         results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "fail",
             "'Equal Housing Lender' statement or logo not found on this page.",
@@ -793,7 +851,7 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
     # 5. CCPA privacy policy  (search both text AND HTML links, like realestate version)
     has_privacy = CCPA_RE.search(text) or \
                   bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
-                  bool(re.search(r'href=["\'][^"\']*privacy[^"\']*["\']', html, re.I))
+                  _has_own_privacy_link(html)
     has_dns     = DO_NOT_SELL_RE.search(text) or \
                   bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
     if has_privacy:
@@ -837,10 +895,7 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
 
     # 7. Contact information  (check HTML mailto: links and contact page links too)
     has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
-    has_email = bool(re.search(r'[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', text, re.I)) or \
-                bool(re.search(r'mailto:[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}', html, re.I)) or \
-                bool(re.search(r'(click\s+(here\s+)?to\s+)?e[\-\s]?mail\s+(me|us)|contact\s+us|send\s+(a\s+)?message|get\s+in\s+touch|reach\s+(out|us)', text, re.I)) or \
-                bool(re.search(r'href=["\'][^"\']*(/contact|/email|/reach-out|/get-in-touch|/message)[^"\']*["\']', html, re.I))
+    has_email = _has_real_email(text, html)
     if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
             "Phone and email contact found on page.",
@@ -1086,6 +1141,39 @@ async def scan(req: ScanRequest, request: Request):
         text = scraped["text"]
         html = scraped["raw_html"]
         eho_signals = scraped.get("eho_signals", [])
+        final_url = scraped.get("url_final", url)
+
+        # --- Parked / for-sale domain detection ---
+        # If the site redirected to a known domain parking service, short-circuit
+        # with a special status instead of scoring a non-existent business.
+        _PARKED_DOMAINS = [
+            'forsale.godaddy.com', 'godaddy.com/forsale', 'afternic.com',
+            'sedo.com', 'dan.com', 'hugedomains.com', 'bodis.com',
+            'above.com', 'parkingcrew.net', 'sedoparking.com',
+        ]
+        _PARKED_SIGNALS = [
+            'domain is for sale', 'this domain is for sale', 'buy this domain',
+            'make an offer', 'domain may be for sale', 'parked free',
+            'this webpage was generated by the domain owner',
+        ]
+        is_parked = any(d in final_url.lower() for d in _PARKED_DOMAINS) or \
+                    any(s in text[:2000] for s in _PARKED_SIGNALS)
+        if is_parked:
+            elapsed = round(time.time() - t0, 1)
+            response = {
+                "scan_id": scan_id,
+                "score": None,
+                "url": final_url,
+                "profession": req.profession,
+                "elapsed_seconds": elapsed,
+                "status": "parked_domain",
+                "message": "This domain appears to be parked or for sale. No active business website was found to scan.",
+                "checks": [],
+            }
+            await update_scan_status(scan_id, "completed", result=response,
+                                     error_type="parked_domain",
+                                     error_message="Domain is parked or for sale — no business content to scan.")
+            return response
 
         if req.profession == "lending":
             rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
