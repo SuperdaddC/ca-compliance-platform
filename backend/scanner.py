@@ -396,9 +396,9 @@ async def scrape_website(url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 # --- Shared patterns ---
-DRE_LICENSE_RE = re.compile(r'\bdre\s*#?\s*\d{7,9}\b|\bcalifornia\s+real\s+estate\s+broker\s+#?\s*\d{7,9}\b|\bcalbre\s*#?\s*\d{7,9}\b', re.I)
-BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*#?\s*\d{7,9}\b', re.I)
-NMLS_RE        = re.compile(r'\bnmls\s*#?\s*\d{4,10}\b', re.I)
+DRE_LICENSE_RE = re.compile(r'\bdre\s*[#:.]?\s*\d{7,9}\b|\bcalifornia\s+real\s+estate\s+broker\s*[#:.]?\s*\d{7,9}\b|\bcalbre\s*[#:.]?\s*\d{7,9}\b', re.I)
+BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*[#:.]?\s*\d{7,9}\b', re.I)
+NMLS_RE        = re.compile(r'\bnmls\s*[#:.]?\s*\d{4,10}\b', re.I)
 EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s*(opportunity|lender|logo)?', re.I)
 EHO_IMG_RE     = re.compile(r'(equal[_\-.\s]?housing|eho[_\-.]?(logo|icon|badge|seal)?\.?(png|svg|jpg|gif|webp)?|fair[_\-.\s]?housing|equal[_\-.\s]?opportunity)', re.I)
 CCPA_RE        = re.compile(r'privacy\s+(policy|notice|statement|and\s+terms|&\s+terms)|ccpa|do\s+not\s+sell', re.I)
