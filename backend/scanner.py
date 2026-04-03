@@ -420,7 +420,10 @@ TILA_WINDOW = 400
 
 # DRE-specific
 RESPONSIBLE_BROKER_RE = re.compile(
-    r'(responsible\s+broker|supervising\s+broker|broker\s+of\s+record|dba\s+.{0,60}broker)', re.I
+    r'(responsible\s+broker|supervising\s+broker|broker\s+of\s+record|dba\s+.{0,60}broker'
+    r'|is\s+a\s+real\s+estate\s+broker\s+licensed'
+    r'|real\s+estate\s+broker.{0,30}license\s+number\s*[#:.]?\s*\d{7,9}'
+    r'|brokerage.{0,30}license\s*[#:.]?\s*\d{7,9})', re.I
 )
 TEAM_NAME_RE = re.compile(
     r'\b(team|group|associates|partners|realty|properties)\b', re.I
