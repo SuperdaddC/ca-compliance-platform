@@ -315,8 +315,7 @@ export default function Scan() {
 
             {/* Trust strip */}
             <div className="text-center mt-6 text-xs text-gray-400 flex justify-center gap-6 flex-wrap">
-              <span>🏛️ DRE Broker #01842442</span>
-              <span>📋 NMLS #276626</span>
+              <span>🏛️ Built by CA Licensed Brokers</span>
               <span>🔒 Results never shared</span>
             </div>
           </>
