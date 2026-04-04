@@ -1561,14 +1561,53 @@ async def api_scan(req: ApiScanRequest, request: Request):
         text = scraped["text"]
         html = scraped["raw_html"]
         eho_signals = scraped.get("eho_signals", [])
+        final_url = scraped.get("url_final", url)
+
+        # --- DRE lookup for realestate scans (broker identification) ---
+        dre_number = None
+        dre_info = None
+        if req.profession != "lending":
+            dre_match = DRE_LICENSE_RE.search(text)
+            if dre_match:
+                num_match = re.search(r'\d{7,9}', dre_match.group())
+                if num_match:
+                    dre_number = num_match.group()
+                    log.info(f"[api_scan] DRE number found via labeled regex: #{dre_number}")
+            if not dre_number:
+                for m in re.finditer(r'\b(\d{8})\b', text):
+                    pos = m.start()
+                    look_back = text[max(0, pos-80):pos].upper()
+                    if re.search(r'NMLS', look_back):
+                        continue
+                    if re.search(r'[\-\(\)]\s*$', look_back):
+                        continue
+                    if re.search(r'(LIC|DRE|BRE|CALBRE|LICENSE|BROKER|#)', look_back):
+                        dre_number = m.group(1)
+                        log.info(f"[api_scan] DRE number found via bare 8-digit: #{dre_number}")
+                        break
+            if dre_number:
+                dre_info = await lookup_dre_info(dre_number)
+                log.info(f"[api_scan] DRE lookup #{dre_number}: type={dre_info.get('license_type')}, name={dre_info.get('name')}")
+            else:
+                log.info(f"[api_scan] No DRE number found for {url}")
 
         if req.profession == "lending":
             rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
         else:
-            rule_results = run_realestate_checks(text, html, eho_signals=eho_signals)
+            rule_results = run_realestate_checks(text, html, eho_signals=eho_signals,
+                                                  dre_number=dre_number, dre_info=dre_info)
 
-        ai_check = await check_ai_crawler_blocking(scraped["url_final"])
+        ai_check = await check_ai_crawler_blocking(final_url)
         rule_results.append(ai_check)
+
+        # --- Subpage diagnostic ---
+        from urllib.parse import urlparse
+        parsed_url = urlparse(final_url)
+        is_subpage = parsed_url.path not in ("", "/", "/index.html", "/index.php")
+        if is_subpage:
+            for r in rule_results:
+                if r.id == "contact_info" and r.status == "fail":
+                    r.detail = (r.detail or "") + f" Note: this scan checked {parsed_url.path} — the homepage may have contact info."
 
         score = score_results(rule_results)
         elapsed = round(time.time() - t0, 1)
@@ -1576,7 +1615,7 @@ async def api_scan(req: ApiScanRequest, request: Request):
         response = {
             "scan_id": scan_id,
             "score": score,
-            "url": scraped["url_final"],
+            "url": final_url,
             "profession": req.profession,
             "status": "completed",
             "is_free_scan": False,
