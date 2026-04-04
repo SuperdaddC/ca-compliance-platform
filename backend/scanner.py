@@ -439,10 +439,11 @@ async def scrape_website(url: str) -> dict:
 
 # --- Shared patterns ---
 DRE_LICENSE_RE = re.compile(
-    r'\bdre\s*[#:.]?\s*\d{7,9}\b'
-    r'|\bbre\s*[#:.]?\s*\d{7,9}\b'              # legacy "BRE #" prefix (pre-2018 branding)
+    r'\bdre\s*(?:no\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "DRE #", "DRE No.", "CA DRE No. 00618471"
+    r'|\bbre\s*(?:no\.?)?\s*[#:.]?\s*\d{7,9}\b' # legacy "BRE #" prefix (pre-2018 branding)
     r'|\bcalifornia\s+real\s+estate\s+broker\s*[#:.]?\s*\d{7,9}\b'
     r'|\bcalbre\s*[#:.]?\s*\d{7,9}\b'
+    r'|\bca[\s\-]+dre\s*(?:no\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "CA DRE No. 00618471", "CA-DRE #01234567"
     r'|\blicense\s+(?:id|#|number)\s*[#:.]?\s*0[12]\d{6}\b',  # "License ID: 01234567" (DRE format: starts with 0)
     re.I)
 BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*[#:.]?\s*\d{7,9}\b', re.I)
