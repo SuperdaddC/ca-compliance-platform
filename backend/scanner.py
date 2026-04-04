@@ -438,7 +438,12 @@ async def scrape_website(url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 # --- Shared patterns ---
-DRE_LICENSE_RE = re.compile(r'\bdre\s*[#:.]?\s*\d{7,9}\b|\bcalifornia\s+real\s+estate\s+broker\s*[#:.]?\s*\d{7,9}\b|\bcalbre\s*[#:.]?\s*\d{7,9}\b', re.I)
+DRE_LICENSE_RE = re.compile(
+    r'\bdre\s*[#:.]?\s*\d{7,9}\b'
+    r'|\bcalifornia\s+real\s+estate\s+broker\s*[#:.]?\s*\d{7,9}\b'
+    r'|\bcalbre\s*[#:.]?\s*\d{7,9}\b'
+    r'|\blicense\s+(?:id|#|number)\s*[#:.]?\s*0[12]\d{6}\b',  # "License ID: 01234567" / "License #: 02003679" (DRE format: starts with 0)
+    re.I)
 BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*[#:.]?\s*\d{7,9}\b', re.I)
 NMLS_RE        = re.compile(r'\bnmls\s*[#:.]?\s*\d{4,10}\b', re.I)
 EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s*(opportunity|lender|logo)?', re.I)
