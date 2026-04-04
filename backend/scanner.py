@@ -1342,12 +1342,32 @@ async def scan(req: ScanRequest, request: Request):
         dre_number = None
         dre_info = None
         if req.profession != "lending":
+            # Try labeled DRE number first (DRE #, CalBRE #, etc.)
             dre_match = DRE_LICENSE_RE.search(text)
             if dre_match:
-                dre_number = re.search(r'\d{7,9}', dre_match.group()).group()
+                num_match = re.search(r'\d{7,9}', dre_match.group())
+                if num_match:
+                    dre_number = num_match.group()
+                    log.info(f"DRE number found via labeled regex: #{dre_number}")
+            # Fallback: find bare 8-digit numbers, skip NMLS-labeled ones
+            if not dre_number:
+                for m in re.finditer(r'\b(\d{8})\b', text):
+                    pos = m.start()
+                    look_back = text[max(0, pos-80):pos].upper()
+                    if re.search(r'NMLS', look_back):
+                        continue
+                    if re.search(r'[\-\(\)]\s*$', look_back):
+                        continue
+                    # Check if this looks like a license number context
+                    if re.search(r'(LIC|DRE|BRE|CALBRE|LICENSE|BROKER|#)', look_back):
+                        dre_number = m.group(1)
+                        log.info(f"DRE number found via bare 8-digit with context: #{dre_number}")
+                        break
             if dre_number:
                 dre_info = await lookup_dre_info(dre_number)
-                log.info(f"DRE lookup for #{dre_number}: type={dre_info.get('license_type')}, name={dre_info.get('name')}, officer={dre_info.get('designated_officer')}")
+                log.info(f"DRE lookup result for #{dre_number}: type={dre_info.get('license_type')}, name={dre_info.get('name')}, officer={dre_info.get('designated_officer')}")
+            else:
+                log.info(f"No DRE number found in page text for {url}")
 
         if req.profession == "lending":
             rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
