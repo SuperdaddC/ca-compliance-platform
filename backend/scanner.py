@@ -333,6 +333,17 @@ async def scrape_website(url: str) -> dict:
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1500)
 
+            # Platform-specific extra wait for JS-heavy franchise sites
+            current_url = page.url.lower()
+            if any(p in current_url for p in ['.kw.com', 'kw.com/', 'compass.com', 'exprealty.com',
+                                               'realtyonegroup.com', 'c21', 'century21',
+                                               'bhhs.com', 'coldwellbanker', 'sothebysrealty']):
+                log.info(f"Platform-specific extra wait for {current_url}")
+                await page.wait_for_timeout(3000)
+                # One more scroll after extra wait
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1000)
+
             inner_text = await page.evaluate("() => document.body.innerText") or ""
             raw_html   = await page.evaluate("() => document.body.innerHTML") or ""
             head_html  = await page.evaluate("() => document.head ? document.head.innerHTML : ''") or ""
@@ -362,24 +373,50 @@ async def scrape_website(url: str) -> dict:
             )
 
             # Detect EHO / Fair Housing logo via DOM (catches images, SVGs, iframes)
+            # Tightened: word-bound "eho", visibility check, SVG nearby-text, SVG size heuristic
             eho_signals = await page.evaluate("""() => {
-                const kw = /equal.?housing|eho|fair.?housing|equal.?opportunity/i;
+                const kwFull = /equal.?housing|fair.?housing|equal.?opportunity/i;
+                const kwEho = /\\beho\\b/i;
+                const test = (s) => kwFull.test(s) || kwEho.test(s);
+                const isVisible = (el) => {
+                    try {
+                        const style = window.getComputedStyle(el);
+                        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                    } catch(e) { return true; }
+                };
                 const signals = [];
-                // Check all img src and alt
+
+                // Check all img src, alt, and title
                 document.querySelectorAll('img').forEach(img => {
-                    if (kw.test(img.src) || kw.test(img.alt || '') || kw.test(img.title || ''))
+                    if (!isVisible(img)) return;
+                    if (test(img.src) || test(img.alt || '') || test(img.title || ''))
                         signals.push('img:' + (img.alt || img.src).substring(0, 80));
                 });
-                // Check SVG title/desc and nearby text
+
+                // Check SVG — textContent, aria-label, AND nearby parent text
                 document.querySelectorAll('svg').forEach(svg => {
+                    if (!isVisible(svg)) return;
                     const t = (svg.textContent || '') + (svg.getAttribute('aria-label') || '');
-                    if (kw.test(t)) signals.push('svg:' + t.substring(0, 80));
+                    if (test(t)) {
+                        signals.push('svg:' + t.substring(0, 80));
+                    } else {
+                        // Check parent/sibling text for EHO near a pure-path SVG
+                        const parent = svg.closest('a, div, span, li, footer, section');
+                        if (parent) {
+                            const nearby = parent.textContent || '';
+                            if (kwFull.test(nearby))
+                                signals.push('svg-nearby:' + nearby.substring(0, 80));
+                        }
+                    }
                 });
+
                 // Check aria-label on any element
                 document.querySelectorAll('[aria-label]').forEach(el => {
-                    if (kw.test(el.getAttribute('aria-label')))
+                    if (!isVisible(el)) return;
+                    if (test(el.getAttribute('aria-label')))
                         signals.push('aria:' + el.getAttribute('aria-label').substring(0, 80));
                 });
+
                 return signals;
             }""")
             log.info(f"EHO DOM signals for {url}: {eho_signals}")
@@ -405,11 +442,20 @@ DRE_LICENSE_RE = re.compile(r'\bdre\s*[#:.]?\s*\d{7,9}\b|\bcalifornia\s+real\s+e
 BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*[#:.]?\s*\d{7,9}\b', re.I)
 NMLS_RE        = re.compile(r'\bnmls\s*[#:.]?\s*\d{4,10}\b', re.I)
 EQUAL_HOUSING_RE = re.compile(r'equal\s+housing\s*(opportunity|lender|logo)?', re.I)
-EHO_IMG_RE     = re.compile(r'(equal[_\-.\s]?housing|eho[_\-.]?(logo|icon|badge|seal)?\.?(png|svg|jpg|gif|webp)?|fair[_\-.\s]?housing|equal[_\-.\s]?opportunity)', re.I)
+EHO_IMG_RE     = re.compile(
+    r'(equal[_\-.\s]?housing'
+    r'|\beho[_\-.](?:logo|icon|badge|seal)'    # "eho-logo", "eho_icon" etc. (require suffix)
+    r'|\beho\.(?:png|svg|jpg|gif|webp)\b'       # "eho.png", "eho.svg" etc. (require extension)
+    r'|fair[_\-.\s]?housing'
+    r'|equal[_\-.\s]?opportunity)', re.I)
 CCPA_RE        = re.compile(r'privacy\s+(policy|notice|statement|and\s+terms|&\s+terms)|ccpa|do\s+not\s+sell', re.I)
 DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
 ADA_RE         = re.compile(r'accessibility\s+(statement|policy|commitment|pledge|notice)|ada\s+complian|wcag|section\s+508|web\s+accessibility', re.I)
-PHYSICAL_ADDR_RE = re.compile(r'\b\d{2,5}\s+[A-Z][a-z]+.*?(ave|st|blvd|dr|rd|ln|ct|way|pkwy|pl|cir)\b', re.I)
+PHYSICAL_ADDR_RE = re.compile(
+    r'\b\d{2,5}\s+[A-Z][a-z]+.*?'
+    r'(ave|avenue|st|street|blvd|boulevard|dr|drive|rd|road|ln|lane|ct|court'
+    r'|way|pkwy|parkway|pl|place|cir|circle|ste|suite|hwy|highway'
+    r'|ter|terr|terrace|loop|sq|square|trail|trce|trace)\b', re.I)
 
 # Placeholder / template emails that should not count as real contact info
 PLACEHOLDER_EMAIL_RE = re.compile(
@@ -465,6 +511,75 @@ TILA_TRIGGER_RE = re.compile(
 )
 TILA_APR_RE = re.compile(r'\bapr\b', re.I)
 TILA_WINDOW = 400
+
+# ---------------------------------------------------------------------------
+# DRE public lookup (async) — used for responsible broker identification
+# ---------------------------------------------------------------------------
+_DRE_INFO_CACHE: dict[str, dict] = {}  # persists across requests (names rarely change)
+
+
+async def lookup_dre_info(license_number: str) -> dict:
+    """
+    Async DRE public lookup. Returns dict with keys:
+      name, license_type, status, designated_officer, designated_officer_lic,
+      salespersons (list), main_office, dba
+    All values are strings or None. Results cached.
+    """
+    lic = re.sub(r'\D', '', license_number)
+    if lic in _DRE_INFO_CACHE:
+        return _DRE_INFO_CACHE[lic]
+
+    info = {"name": None, "license_type": None, "status": None,
+            "designated_officer": None, "designated_officer_lic": None,
+            "main_office": None, "dba": None}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                "https://www2.dre.ca.gov/publicasp/pplinfo.asp?start=1",
+                data={"h_nextstep": "SEARCH", "LICENSEE_NAME": "",
+                      "CITY_STATE": "", "LICENSE_ID": lic},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; ComplianceBot/1.0; +https://complywithjudy.com)",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": "https://www2.dre.ca.gov/publicasp/pplinfo.asp",
+                },
+            )
+            html_resp = r.text
+
+        if "public information request complete" not in html_resp.lower():
+            _DRE_INFO_CACHE[lic] = info
+            return info
+
+        def _extract(label):
+            m = re.search(
+                rf'<strong>{label}:</strong>.*?<FONT[^>]*>([^<\r\n]+)',
+                html_resp, re.I | re.DOTALL)
+            return re.sub(r'\s+', ' ', m.group(1)).strip() if m else None
+
+        info["name"] = _extract("Name")
+        info["license_type"] = _extract("License Type")
+        info["status"] = _extract("License Status") or _extract("Status")
+        info["main_office"] = _extract("Main Office")
+        info["dba"] = _extract("DBA")
+
+        # Extract designated officer (for corporation/broker licenses)
+        do_match = re.search(
+            r'DESIGNATED OFFICER.*?<A[^>]*>(\d{7,9})</A>\s*-\s*[^<]*?(\d{2}/\d{2}/\d{2,4})\s*<br\s*/?>([^<]+)',
+            html_resp, re.I | re.DOTALL)
+        if do_match:
+            info["designated_officer_lic"] = do_match.group(1).strip()
+            info["designated_officer"] = do_match.group(3).strip()
+            # Clean up name format: "Sarkissian, Artin" -> "Artin Sarkissian"
+            parts = info["designated_officer"].split(",", 1)
+            if len(parts) == 2:
+                info["designated_officer"] = f"{parts[1].strip()} {parts[0].strip()}"
+
+    except Exception as e:
+        log.warning(f"DRE lookup failed for {lic}: {e}")
+
+    _DRE_INFO_CACHE[lic] = info
+    return info
+
 
 # DRE-specific
 RESPONSIBLE_BROKER_RE = re.compile(
@@ -586,7 +701,8 @@ def check_tila_proximity(text: str) -> RuleResult:
 # ---------------------------------------------------------------------------
 # Real Estate checks
 # ---------------------------------------------------------------------------
-def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> list[RuleResult]:
+def run_realestate_checks(text: str, html: str, eho_signals: list = None,
+                          dre_number: str = None, dre_info: dict = None) -> list[RuleResult]:
     results = []
 
     # 1. DRE license number
@@ -605,36 +721,79 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None) -> lis
             webmaster_email=WM_DRE_LICENSE))
 
     # 2. Responsible broker disclosure
-    if RESPONSIBLE_BROKER_RE.search(text) or BROKER_DRE_RE.search(text):
+    #    Three-tier detection:
+    #    a) Explicit text: "responsible broker", "supervising broker", etc.
+    #    b) DRE lookup: if DRE number found, check if it's a broker/corporation license
+    #       (the DRE number IS the broker identity per B&P §10140.6)
+    #    c) DRE lookup reveals designated officer for corporation licenses
+    has_broker_text = bool(RESPONSIBLE_BROKER_RE.search(text) or BROKER_DRE_RE.search(text))
+    dre_is_broker = False
+    dre_broker_name = None
+    dre_designated_officer = None
+
+    if dre_info and dre_info.get("name"):
+        lic_type = (dre_info.get("license_type") or "").upper()
+        # Corporation or Broker licenses = this IS the broker
+        if any(t in lic_type for t in ("CORPORATION", "BROKER")):
+            dre_is_broker = True
+            dre_broker_name = dre_info["name"]
+            if dre_info.get("designated_officer"):
+                dre_designated_officer = dre_info["designated_officer"]
+
+    if has_broker_text:
         results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "pass",
             "Responsible broker disclosure found.",
             source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
-            regulation="California Business & Professions Code §10159.5 — 'Every licensed salesperson shall have and be under a written agreement with the responsible broker.' Commissioner's Regulation §2773.1 — All advertising by or on behalf of a salesperson must include the identity of the responsible broker or the name of the employing brokerage firm."))
+            regulation="California Business & Professions Code §10159.5 — Commissioner's Regulation §2773.1 — All advertising by or on behalf of a salesperson must include the identity of the responsible broker."))
+    elif dre_is_broker:
+        # DRE number belongs to a broker/corporation — they ARE the broker
+        officer_note = f" Designated officer: {dre_designated_officer}." if dre_designated_officer else ""
+        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "pass",
+            f"Broker identified via DRE lookup: {dre_broker_name} ({(dre_info.get('license_type') or '').title()}).{officer_note}",
+            detail=f"DRE public records confirm license #{dre_number} belongs to {dre_broker_name}. This is a broker-level license — the licensee IS the responsible broker.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="California Business & Professions Code §10140.6(b)(1) — The DRE license number identifies the responsible broker. For broker-owned sites, displaying the DRE number satisfies the broker disclosure requirement."))
+    elif dre_number and dre_info and dre_info.get("name"):
+        # DRE number found but it's a salesperson license — need broker info
+        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "warn",
+            f"DRE #{dre_number} is a salesperson license ({dre_info['name']}). Supervising broker not identified on page.",
+            detail="Salesperson websites must identify the responsible/supervising broker by name and DRE license number.",
+            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+            regulation="Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
+            fix=f"Add your supervising broker's name and DRE number to your footer, e.g.: '[Broker Name], DRE #[Broker Number]'."))
     else:
         results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "fail",
             "No responsible or supervising broker identified on this page.",
-            detail="If you are a salesperson (not a broker), your website must identify your supervising/responsible broker and their DRE license number.",
+            detail="Your website must identify the supervising/responsible broker by name and DRE license number.",
             source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
-            regulation="California Business & Professions Code §10159.5 — Salesperson advertising must include broker identity. Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.' The broker's name and DRE number must be reasonably prominent.",
-            fix="Add to your site footer: '[Your Name], DRE #[Your Number] | [Brokerage Name], DRE #[Broker Number]'. If you are a broker, this check may be a false positive — ensure your broker license number is displayed.",
+            regulation="California Business & Professions Code §10159.5 — Salesperson advertising must include broker identity. Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
+            fix="Add to your site footer: '[Your Name], DRE #[Your Number] | [Brokerage Name], DRE #[Broker Number]'.",
             webmaster_email=WM_RESPONSIBLE_BROKER))
 
     # 3. Equal Housing Opportunity
+    #    Three-tier detection: text regex, HTML img regex, browser DOM signals
+    #    DOM signals are filtered: "svg-nearby" counts as strong, other DOM matches are strong
     has_text = bool(EQUAL_HOUSING_RE.search(text))
     has_img  = bool(EHO_IMG_RE.search(html))
-    has_dom  = bool(eho_signals)  # detected via DOM query in scraper
+    strong_dom = [s for s in (eho_signals or [])
+                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:'))]
+    has_dom = bool(strong_dom)
     if has_text or has_img or has_dom:
+        evidence = ""
+        if strong_dom:
+            evidence = f"DOM signal: {strong_dom[0][:60]}"
         results.append(RuleResult("equal_housing", "Equal Housing Opportunity", "pass",
             "Equal Housing Opportunity logo or statement found.",
+            detail=evidence,
             source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp/advertising_and_marketing",
-            regulation="Fair Housing Act (42 U.S.C. §3604(c)) — It is unlawful 'to make, print, or publish any notice, statement, or advertisement with respect to the sale or rental of a dwelling that indicates any preference, limitation, or discrimination based on race, color, religion, sex, handicap, familial status, or national origin.' HUD Advertising Guidelines (24 CFR Part 109) require the Equal Housing Opportunity logo or statement in all real estate advertising."))
+            regulation="Fair Housing Act (42 U.S.C. §3604(c)) — HUD Advertising Guidelines (24 CFR Part 109) require the Equal Housing Opportunity logo or statement in all real estate advertising."))
     else:
         results.append(RuleResult("equal_housing", "Equal Housing Opportunity", "fail",
             "Equal Housing Opportunity logo or statement not found.",
             detail="The Fair Housing Act and HUD advertising guidelines require all real estate advertising to include the Equal Housing Opportunity logo and/or the statement 'Equal Housing Opportunity.'",
             source_url="https://www.hud.gov/program_offices/fair_housing_equal_opp/advertising_and_marketing",
-            regulation="Fair Housing Act (42 U.S.C. §3604(c)) — Prohibits discriminatory advertising. HUD Advertising Guidelines (24 CFR Part 109.30) — 'All advertising of residential real estate for sale, rent, or financing should contain an equal housing opportunity logotype, statement, or slogan.' The logo must be of a size 'at least equal to the largest of other logotypes.'",
-            fix="Add the Equal Housing Opportunity logo and the words 'Equal Housing Opportunity' to your website footer. Download the official HUD logo from hud.gov. The logo should be clearly visible — not hidden or miniaturized.",
+            regulation="Fair Housing Act (42 U.S.C. §3604(c)) — Prohibits discriminatory advertising. HUD Advertising Guidelines (24 CFR Part 109.30) — 'All advertising of residential real estate for sale, rent, or financing should contain an equal housing opportunity logotype, statement, or slogan.'",
+            fix="Add the Equal Housing Opportunity logo and the words 'Equal Housing Opportunity' to your website footer. The logo should be clearly visible — not hidden or miniaturized.",
             webmaster_email=WM_EQUAL_HOUSING))
 
     # 4. Team advertising compliance
@@ -818,14 +977,18 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
     #    "Equal Housing Opportunity" alone is NOT sufficient for mortgage lenders.
     #    The EHO DOM signals and image regex match both — so we filter here.
     has_lender = bool(re.search(r'equal\s+housing\s+lender', text, re.I))
-    # Only count EHO images/DOM signals if they specifically reference "lender"
-    has_lender_img = bool(re.search(r'equal[_\-.\s]?housing[_\-.\s]?lender', html, re.I))
+    # Check images/HTML for EHL-specific filenames (expanded to catch ehl-logo, ehl_icon, etc.)
+    has_lender_img = bool(re.search(
+        r'equal[_\-.\s]?housing[_\-.\s]?lender|ehl[_\-.]?(?:logo|icon|badge|seal)',
+        html, re.I))
+    # Check DOM signals for "lender" (includes SVG nearby-text from improved JS)
     has_lender_dom = any('lender' in s.lower() for s in (eho_signals or []))
     # Check if "Equal Housing Opportunity" (the RE variant) is present instead
     has_eho_opportunity = bool(re.search(r'equal\s+housing\s+opportunity', text, re.I)) or \
                           bool(re.search(r'equal\s+housing', text, re.I)) or \
                           bool(re.search(r'fair\s+housing', text, re.I)) or \
-                          bool(re.search(r'equal[_\-.\s]?housing', html, re.I))
+                          bool(re.search(r'equal[_\-.\s]?housing', html, re.I)) or \
+                          any(s for s in (eho_signals or []) if 'lender' not in s.lower())
     if has_lender or has_lender_img or has_lender_dom:
         results.append(RuleResult("equal_housing_lender", "Equal Housing Lender Statement", "pass",
             "Equal Housing Lender statement or logo found.",
@@ -1175,14 +1338,35 @@ async def scan(req: ScanRequest, request: Request):
                                      error_message="Domain is parked or for sale — no business content to scan.")
             return response
 
+        # --- DRE lookup for realestate scans (broker identification) ---
+        dre_number = None
+        dre_info = None
+        if req.profession != "lending":
+            dre_match = DRE_LICENSE_RE.search(text)
+            if dre_match:
+                dre_number = re.search(r'\d{7,9}', dre_match.group()).group()
+            if dre_number:
+                dre_info = await lookup_dre_info(dre_number)
+                log.info(f"DRE lookup for #{dre_number}: type={dre_info.get('license_type')}, name={dre_info.get('name')}, officer={dre_info.get('designated_officer')}")
+
         if req.profession == "lending":
             rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
         else:
-            rule_results = run_realestate_checks(text, html, eho_signals=eho_signals)
+            rule_results = run_realestate_checks(text, html, eho_signals=eho_signals,
+                                                  dre_number=dre_number, dre_info=dre_info)
 
         # --- Shared checks (both professions) ---
         ai_check = await check_ai_crawler_blocking(scraped["url_final"])
         rule_results.append(ai_check)
+
+        # --- Subpage diagnostic: if contact_info failed and we scanned a subpage, add context ---
+        from urllib.parse import urlparse
+        parsed_url = urlparse(scraped["url_final"])
+        is_subpage = parsed_url.path not in ("", "/", "/index.html", "/index.php")
+        if is_subpage:
+            for r in rule_results:
+                if r.id == "contact_info" and r.status == "fail":
+                    r.detail = (r.detail or "") + f" Note: this scan checked {parsed_url.path} — the homepage may have contact info that was not analyzed."
 
         score = score_results(rule_results)
         elapsed = round(time.time() - t0, 1)
