@@ -673,9 +673,18 @@ def classify_entity(text: str) -> str:
     """
     lower = text.lower()
 
-    # Nonprofit signals (CDFIs, housing nonprofits, 501(c)(3))
-    if re.search(r'501\s*\(\s*c\s*\)\s*\(?\s*3|nonprofit|non[\-\s]profit|donate\b|tax[\-\s]deductible|\bcdfi\b|community\s+development\s+financial', lower):
-        # But not if they also have brokerage signals
+    # Nonprofit signals — require STRONG self-identification, not just mentioning "nonprofit"
+    # Must describe THEMSELVES as nonprofit (not "loans for nonprofits" or "nonprofit clients")
+    nonprofit_strong = re.search(
+        r'501\s*\(\s*c\s*\)\s*\(?\s*3'           # explicit 501(c)(3)
+        r'|we\s+are\s+a\s+non[\-\s]?profit'       # "we are a nonprofit"
+        r'|\bis\s+a\s+non[\-\s]?profit'            # "[org] is a nonprofit"
+        r'|\bour\s+non[\-\s]?profit'               # "our nonprofit"
+        r'|\btax[\-\s]deductible\s+donation'        # tax-deductible donations (not just "tax deductible")
+        r'|\bdonate\s+(?:now|today|here)\b'         # active donation solicitation
+        r'|\bcommunity\s+development\s+financial\s+institution\b'  # explicit CDFI
+        , lower)
+    if nonprofit_strong:
         if not re.search(r'\bdre\b.*#?\s*\d{7,9}|nmls.*#?\s*\d{4,10}|\bbroker\b|\brealtor\b|\bagent\b', lower):
             return 'nonprofit'
 
