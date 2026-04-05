@@ -394,10 +394,17 @@ async def scrape_website(url: str) -> dict:
                     } catch(e) { return false; }
                 };
                 const signals = [];
+                const isRendered = (img) => {
+                    // Check that the image actually has rendered dimensions (not just in DOM/JS template)
+                    try {
+                        const rect = img.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    } catch(e) { return false; }
+                };
 
                 // Check all img src, alt, and title
                 document.querySelectorAll('img').forEach(img => {
-                    if (!isVisible(img)) return;
+                    if (!isVisible(img) || !isRendered(img)) return;
                     if (test(img.src) || test(img.alt || '') || test(img.title || ''))
                         signals.push('img:' + (img.alt || img.src).substring(0, 80));
                 });
@@ -405,7 +412,7 @@ async def scrape_website(url: str) -> dict:
                 // Check for small square-ish images in footer with no alt text
                 // (common pattern for EHO logos with UUID filenames)
                 document.querySelectorAll('footer img, [class*="footer"] img, [id*="footer"] img').forEach(img => {
-                    if (!isVisible(img)) return;
+                    if (!isVisible(img) || !isRendered(img)) return;
                     const w = img.naturalWidth || img.width;
                     const h = img.naturalHeight || img.height;
                     // EHO logos are typically 20-80px, roughly square or 2:1 ratio
@@ -424,7 +431,7 @@ async def scrape_website(url: str) -> dict:
 
                 // Also check ALL small images in the bottom 30% of the page
                 document.querySelectorAll('img').forEach(img => {
-                    if (!isVisible(img) || !isInFooter(img)) return;
+                    if (!isVisible(img) || !isRendered(img) || !isInFooter(img)) return;
                     const w = img.naturalWidth || img.width;
                     const h = img.naturalHeight || img.height;
                     if (w >= 15 && w <= 120 && h >= 15 && h <= 120) {
