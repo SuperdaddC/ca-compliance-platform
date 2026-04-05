@@ -421,6 +421,41 @@ async def scrape_website(url: str) -> dict:
             }""")
             log.info(f"EHO DOM signals for {url}: {eho_signals}")
 
+            # --- Follow privacy policy link for CCPA verification ---
+            privacy_page_text = ""
+            try:
+                privacy_url = await page.evaluate("""() => {
+                    const links = [...document.querySelectorAll('a[href]')];
+                    const priv = links.find(a => {
+                        const href = (a.href || '').toLowerCase();
+                        const text = (a.textContent || '').toLowerCase();
+                        // Must reference privacy, not external (google, facebook, etc.)
+                        return (/privacy/i.test(href) || /privacy\s*policy/i.test(text))
+                            && !/google\\.com|facebook\\.com|cloudflare\\.com|cookiebot\\.com|onetrust\\.com/i.test(href);
+                    });
+                    return priv ? priv.href : null;
+                }""")
+                if privacy_url and privacy_url != page.url:
+                    log.info(f"Following privacy policy link: {privacy_url}")
+                    await page.goto(privacy_url, wait_until="domcontentloaded", timeout=15000)
+                    privacy_page_text = (await page.evaluate("() => document.body.innerText") or "").lower()
+                    log.info(f"Privacy page loaded: {len(privacy_page_text)} chars")
+            except Exception as e:
+                log.warning(f"Failed to load privacy page: {e}")
+
+            # --- Capture footer screenshot for vision analysis ---
+            footer_screenshot_bytes = b""
+            try:
+                page_height = await page.evaluate("() => document.body.scrollHeight")
+                if page_height > 250:
+                    footer_screenshot_bytes = await page.screenshot(
+                        type="png",
+                        clip={"x": 0, "y": max(0, page_height - 250), "width": 1280, "height": 250}
+                    )
+                    log.info(f"Footer screenshot captured: {len(footer_screenshot_bytes)} bytes")
+            except Exception as e:
+                log.warning(f"Footer screenshot failed: {e}")
+
             return {
                 "text": combined,
                 "raw_html": raw_html[:200000],  # cap at 200k chars
@@ -428,6 +463,8 @@ async def scrape_website(url: str) -> dict:
                 "internal_link_count": links,
                 "url_final": page.url,
                 "eho_signals": eho_signals,
+                "privacy_page_text": privacy_page_text,
+                "footer_screenshot_bytes": footer_screenshot_bytes,
             }
 
         finally:
@@ -588,6 +625,79 @@ async def lookup_dre_info(license_number: str) -> dict:
     return info
 
 
+# ---------------------------------------------------------------------------
+# Footer vision analysis — detect Equal Housing logos in screenshots
+# ---------------------------------------------------------------------------
+async def check_eho_via_vision(footer_bytes: bytes) -> dict:
+    """
+    Use Claude vision to check a footer screenshot for Equal Housing logo.
+    Returns dict with keys: has_ehl (bool), has_eho (bool), raw (str).
+    Falls back gracefully if API key not set or call fails.
+    """
+    if not footer_bytes or len(footer_bytes) < 1000:
+        return {"has_ehl": False, "has_eho": False, "raw": "no_screenshot"}
+    try:
+        import anthropic
+        import base64
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return {"has_ehl": False, "has_eho": False, "raw": "no_api_key"}
+        client = anthropic.Anthropic(api_key=api_key)
+        b64 = base64.b64encode(footer_bytes).decode()
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=50,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                    {"type": "text", "text": "Does this website footer contain an Equal Housing logo (house icon with = sign)? If yes, does the text say 'Equal Housing Lender' or 'Equal Housing Opportunity'? Reply with exactly one word: EHL, EHO, or NONE"}
+                ]
+            }]
+        )
+        raw = response.content[0].text.strip().upper()
+        log.info(f"Vision EHO check result: {raw}")
+        return {"has_ehl": "EHL" in raw, "has_eho": "EHO" in raw or "EHL" in raw, "raw": raw}
+    except Exception as e:
+        log.warning(f"Vision EHO check failed: {e}")
+        return {"has_ehl": False, "has_eho": False, "raw": f"error:{e}"}
+
+
+# ---------------------------------------------------------------------------
+# Entity classification — detect non-brokerage entities to skip inapplicable checks
+# ---------------------------------------------------------------------------
+def classify_entity(text: str) -> str:
+    """
+    Classify the website entity type from page content.
+    Returns one of: 'nonprofit', 'commercial_developer', 'property_manager',
+    'commercial_lender', or 'standard' (apply normal checks).
+    """
+    lower = text.lower()
+
+    # Nonprofit signals (CDFIs, housing nonprofits, 501(c)(3))
+    if re.search(r'501\s*\(\s*c\s*\)\s*\(?\s*3|nonprofit|non[\-\s]profit|donate\b|tax[\-\s]deductible|\bcdfi\b|community\s+development\s+financial', lower):
+        # But not if they also have brokerage signals
+        if not re.search(r'\bdre\b.*#?\s*\d{7,9}|nmls.*#?\s*\d{4,10}|\bbroker\b|\brealtor\b|\bagent\b', lower):
+            return 'nonprofit'
+
+    # Commercial RE developer/investor (not a brokerage)
+    if re.search(r'multifamily|apartment.{0,30}(?:develop|invest)|commercial\s+real\s+estate\s+invest|private\s+equity.*real\s+estate|fund\s+(?:i|ii|iii|iv|v)\b', lower):
+        if not re.search(r'\bdre\b|\bnmls\b|\bbroker\b|\bagent\b|\brealtor\b', lower):
+            return 'commercial_developer'
+
+    # Property manager only (no sales activity)
+    if re.search(r'property\s+manag|residential\s+manag|tenant\s+(?:service|portal|login)|leasing\s+office|rent\s+(?:collection|payment)', lower):
+        if not re.search(r'\bdre\b|\bbroker\b|\bagent\b|for\s+sale|\blisting\b', lower):
+            return 'property_manager'
+
+    # SBA/commercial-only lender (not residential mortgage)
+    if re.search(r'sba\s+504|sba\s+7\s*\(\s*a\s*\)|small\s+business\s+loan|commercial\s+(?:loan|lending|finance)', lower):
+        if not re.search(r'mortgage|home\s+loan|residential\s+(?:loan|lending|mortgage)', lower):
+            return 'commercial_lender'
+
+    return 'standard'
+
+
 # DRE-specific
 RESPONSIBLE_BROKER_RE = re.compile(
     r'(responsible\s+broker|supervising\s+broker|broker\s+of\s+record|dba\s+.{0,60}broker'
@@ -709,7 +819,8 @@ def check_tila_proximity(text: str) -> RuleResult:
 # Real Estate checks
 # ---------------------------------------------------------------------------
 def run_realestate_checks(text: str, html: str, eho_signals: list = None,
-                          dre_number: str = None, dre_info: dict = None) -> list[RuleResult]:
+                          dre_number: str = None, dre_info: dict = None,
+                          privacy_page_text: str = "") -> list[RuleResult]:
     results = []
 
     # 1. DRE license number
@@ -859,11 +970,19 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
 
     # 7. CCPA privacy policy (check both text and HTML for links/anchors)
     #    Filter out external privacy links (Google reCAPTCHA, third-party widgets)
+    #    Also check privacy_page_text if the subpage was followed
+    all_privacy_text = text + " " + privacy_page_text
     has_privacy = CCPA_RE.search(text) or \
                   bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
                   _has_own_privacy_link(html)
-    has_dns     = DO_NOT_SELL_RE.search(text) or \
+    has_dns     = DO_NOT_SELL_RE.search(all_privacy_text) or \
                   bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
+    # Check privacy subpage for CCPA-specific content
+    has_ccpa_on_subpage = bool(re.search(
+        r'california\s+consumer\s+privacy|ccpa|cpra|right\s+to\s+(?:know|delete|opt)|california\s+privacy\s+rights',
+        privacy_page_text, re.I)) if privacy_page_text else False
+    if has_ccpa_on_subpage:
+        has_dns = has_dns or bool(re.search(r'do\s+not\s+sell|opt[\-\s]out', privacy_page_text, re.I))
     if has_privacy:
         if has_dns:
             results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "pass",
@@ -944,7 +1063,8 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
 # ---------------------------------------------------------------------------
 # Lending / MLO checks
 # ---------------------------------------------------------------------------
-def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[RuleResult]:
+def run_lending_checks(text: str, html: str, eho_signals: list = None,
+                       privacy_page_text: str = "") -> list[RuleResult]:
     results = []
 
     # 1. TILA / Reg Z APR proximity
@@ -1019,11 +1139,18 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None) -> list[R
             webmaster_email=WM_EHL))
 
     # 5. CCPA privacy policy  (search both text AND HTML links, like realestate version)
+    #    Also check privacy_page_text if the subpage was followed
+    all_privacy_text = text + " " + privacy_page_text
     has_privacy = CCPA_RE.search(text) or \
                   bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
                   _has_own_privacy_link(html)
-    has_dns     = DO_NOT_SELL_RE.search(text) or \
+    has_dns     = DO_NOT_SELL_RE.search(all_privacy_text) or \
                   bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
+    has_ccpa_on_subpage = bool(re.search(
+        r'california\s+consumer\s+privacy|ccpa|cpra|right\s+to\s+(?:know|delete|opt)|california\s+privacy\s+rights',
+        privacy_page_text, re.I)) if privacy_page_text else False
+    if has_ccpa_on_subpage:
+        has_dns = has_dns or bool(re.search(r'do\s+not\s+sell|opt[\-\s]out', privacy_page_text, re.I))
     if has_privacy:
         if has_dns:
             results.append(RuleResult("ccpa_privacy", "CCPA/CPRA Privacy Policy", "pass",
@@ -1376,15 +1503,73 @@ async def scan(req: ScanRequest, request: Request):
             else:
                 log.info(f"No DRE number found in page text for {url}")
 
+        # --- Entity classification ---
+        entity_type = classify_entity(text)
+        if entity_type != 'standard':
+            log.info(f"Entity classified as '{entity_type}' for {url}")
+
+        privacy_page_text = scraped.get("privacy_page_text", "")
         if req.profession == "lending":
-            rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
+            rule_results = run_lending_checks(text, html, eho_signals=eho_signals,
+                                              privacy_page_text=privacy_page_text)
         else:
             rule_results = run_realestate_checks(text, html, eho_signals=eho_signals,
-                                                  dre_number=dre_number, dre_info=dre_info)
+                                                  dre_number=dre_number, dre_info=dre_info,
+                                                  privacy_page_text=privacy_page_text)
+
+        # --- Skip inapplicable checks for non-standard entities ---
+        if entity_type == 'nonprofit':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as nonprofit organization."
+                    r.fix = ""
+        elif entity_type == 'commercial_developer':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as commercial real estate developer/investor."
+                    r.fix = ""
+        elif entity_type == 'property_manager':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as property management company."
+                    r.fix = ""
+        elif entity_type == 'commercial_lender':
+            for r in rule_results:
+                if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage)."
+                    r.fix = ""
 
         # --- Shared checks (both professions) ---
         ai_check = await check_ai_crawler_blocking(scraped["url_final"])
         rule_results.append(ai_check)
+
+        # --- Vision fallback for EHO/EHL detection ---
+        footer_bytes = scraped.get("footer_screenshot_bytes", b"")
+        eho_check_ids = ("equal_housing", "equal_housing_lender")
+        eho_needs_vision = any(r.id in eho_check_ids and r.status in ("fail", "warn") for r in rule_results)
+        if eho_needs_vision and footer_bytes:
+            vision = await check_eho_via_vision(footer_bytes)
+            if vision.get("has_ehl") or vision.get("has_eho"):
+                for r in rule_results:
+                    if r.id == "equal_housing" and r.status == "fail" and vision.get("has_eho"):
+                        r.status = "pass"
+                        r.description = "Equal Housing Opportunity logo detected via footer screenshot analysis."
+                        r.detail = f"Vision analysis: {vision.get('raw', '')}"
+                        r.fix = ""
+                    elif r.id == "equal_housing_lender":
+                        if r.status == "fail" and vision.get("has_ehl"):
+                            r.status = "pass"
+                            r.description = "Equal Housing Lender logo detected via footer screenshot analysis."
+                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
+                            r.fix = ""
+                        elif r.status == "fail" and vision.get("has_eho"):
+                            r.status = "warn"
+                            r.description = "'Equal Housing Opportunity' logo detected (via screenshot), but mortgage lenders should use 'Equal Housing Lender'."
+                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
 
         # --- Subpage diagnostic: if contact_info failed and we scanned a subpage, add context ---
         from urllib.parse import urlparse
@@ -1403,6 +1588,7 @@ async def scan(req: ScanRequest, request: Request):
             "score": score,
             "url": scraped["url_final"],
             "profession": req.profession,
+            "entity_type": entity_type,
             "status": "completed",
             "is_free_scan": (reason == "free"),
             "elapsed_seconds": elapsed,
@@ -1598,14 +1784,72 @@ async def api_scan(req: ApiScanRequest, request: Request):
             else:
                 log.info(f"[api_scan] No DRE number found for {url}")
 
+        # --- Entity classification ---
+        entity_type = classify_entity(text)
+        if entity_type != 'standard':
+            log.info(f"[api_scan] Entity classified as '{entity_type}' for {url}")
+
+        privacy_page_text = scraped.get("privacy_page_text", "")
         if req.profession == "lending":
-            rule_results = run_lending_checks(text, html, eho_signals=eho_signals)
+            rule_results = run_lending_checks(text, html, eho_signals=eho_signals,
+                                              privacy_page_text=privacy_page_text)
         else:
             rule_results = run_realestate_checks(text, html, eho_signals=eho_signals,
-                                                  dre_number=dre_number, dre_info=dre_info)
+                                                  dre_number=dre_number, dre_info=dre_info,
+                                                  privacy_page_text=privacy_page_text)
+
+        # --- Skip inapplicable checks for non-standard entities ---
+        if entity_type == 'nonprofit':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as nonprofit organization."
+                    r.fix = ""
+        elif entity_type == 'commercial_developer':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as commercial real estate developer/investor."
+                    r.fix = ""
+        elif entity_type == 'property_manager':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as property management company."
+                    r.fix = ""
+        elif entity_type == 'commercial_lender':
+            for r in rule_results:
+                if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage)."
+                    r.fix = ""
 
         ai_check = await check_ai_crawler_blocking(final_url)
         rule_results.append(ai_check)
+
+        # --- Vision fallback for EHO/EHL detection ---
+        footer_bytes = scraped.get("footer_screenshot_bytes", b"")
+        eho_check_ids = ("equal_housing", "equal_housing_lender")
+        eho_needs_vision = any(r.id in eho_check_ids and r.status in ("fail", "warn") for r in rule_results)
+        if eho_needs_vision and footer_bytes:
+            vision = await check_eho_via_vision(footer_bytes)
+            if vision.get("has_ehl") or vision.get("has_eho"):
+                for r in rule_results:
+                    if r.id == "equal_housing" and r.status == "fail" and vision.get("has_eho"):
+                        r.status = "pass"
+                        r.description = "Equal Housing Opportunity logo detected via footer screenshot analysis."
+                        r.detail = f"Vision analysis: {vision.get('raw', '')}"
+                        r.fix = ""
+                    elif r.id == "equal_housing_lender":
+                        if r.status == "fail" and vision.get("has_ehl"):
+                            r.status = "pass"
+                            r.description = "Equal Housing Lender logo detected via footer screenshot analysis."
+                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
+                            r.fix = ""
+                        elif r.status == "fail" and vision.get("has_eho"):
+                            r.status = "warn"
+                            r.description = "'Equal Housing Opportunity' logo detected (via screenshot), but mortgage lenders should use 'Equal Housing Lender'."
+                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
 
         # --- Subpage diagnostic ---
         from urllib.parse import urlparse
@@ -1624,6 +1868,7 @@ async def api_scan(req: ApiScanRequest, request: Request):
             "score": score,
             "url": final_url,
             "profession": req.profession,
+            "entity_type": entity_type,
             "status": "completed",
             "is_free_scan": False,
             "elapsed_seconds": elapsed,
