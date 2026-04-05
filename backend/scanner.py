@@ -569,9 +569,15 @@ PHYSICAL_ADDR_RE = re.compile(
 PLACEHOLDER_EMAIL_RE = re.compile(
     r'\b(user@domain\.com|email@example\.com|name@company\.com|'
     r'your@email\.com|info@example\.com|test@test\.com|'
-    r'example@example\.com|admin@example\.com|'
+    r'example@example\.com|admin@example\.com|example@domain\.com|'
+    r'youremail@email\.com|yourname@email\.com|'
     r'noreply@|no-reply@|donotreply@|'
     r'[a-z]+@sentry\.io|[a-z]+@placeholder\.)\b', re.I)
+
+# Placeholder phone numbers (WordPress/template defaults)
+PLACEHOLDER_PHONE_RE = re.compile(
+    r'\(123\)\s*456[\-\s]?7890|\(000\)\s*000[\-\s]?0000|'
+    r'555[\-\s]?555[\-\s]?5555|123[\-\s]?456[\-\s]?7890', re.I)
 
 
 _EXTERNAL_PRIVACY_DOMAINS = re.compile(
@@ -1041,7 +1047,7 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
             webmaster_email=WM_CCPA))
 
     # 8. Contact information
-    has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
+    has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text)) and not PLACEHOLDER_PHONE_RE.search(text)
     has_email = _has_real_email(text, html)
     has_addr  = bool(PHYSICAL_ADDR_RE.search(text))
     if has_phone and has_email:
@@ -1226,7 +1232,7 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None,
             regulation="California Financial Code §22161 — Advertising must not be false, misleading, or deceptive. No prohibited terms detected."))
 
     # 7. Contact information  (check HTML mailto: links and contact page links too)
-    has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text))
+    has_phone = bool(re.search(r'\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}', text)) and not PLACEHOLDER_PHONE_RE.search(text)
     has_email = _has_real_email(text, html)
     if has_phone and has_email:
         results.append(RuleResult("contact_info", "Contact Information", "pass",
