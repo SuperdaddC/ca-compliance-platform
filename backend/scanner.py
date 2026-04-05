@@ -475,6 +475,26 @@ async def scrape_website(url: str) -> dict:
                         signals.push('aria:' + el.getAttribute('aria-label').substring(0, 80));
                 });
 
+                // Check CSS font-icon classes (e.g., ssi-eho, icon-eho, fa-house)
+                const iconSelectors = [
+                    '[class*="eho"]', '[class*="equal-housing"]', '[class*="fair-housing"]',
+                    '[class*="equalhousing"]', '[class*="fairhousing"]',
+                    'i.ssi-eho', 'i.ssi-realtor', 'span.eho', 'i.eho'
+                ];
+                for (const sel of iconSelectors) {
+                    try {
+                        document.querySelectorAll(sel).forEach(el => {
+                            if (!isVisible(el)) return;
+                            const cls = el.className || '';
+                            // Only count if the class specifically references EHO, not just contains "eho" as substring
+                            if (/\\beho\\b|equal.?housing|fair.?housing/i.test(cls)) {
+                                const hasLender = kwLender.test(cls) || kwLender.test(el.textContent || '');
+                                signals.push('icon:' + (hasLender ? 'lender:' : '') + cls.substring(0, 60));
+                            }
+                        });
+                    } catch(e) {}
+                }
+
                 return signals;
             }""")
             log.info(f"EHO DOM signals for {url}: {eho_signals}")
@@ -909,7 +929,7 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
     has_text = bool(EQUAL_HOUSING_RE.search(text))
     has_img  = bool(EHO_IMG_RE.search(html))
     strong_dom = [s for s in (eho_signals or [])
-                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:'))]
+                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:', 'icon:'))]
     has_dom = bool(strong_dom)
     if has_text or has_img or has_dom:
         evidence = ""
