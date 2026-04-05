@@ -377,12 +377,21 @@ async def scrape_website(url: str) -> dict:
             eho_signals = await page.evaluate("""() => {
                 const kwFull = /equal.?housing|fair.?housing|equal.?opportunity/i;
                 const kwEho = /\\beho\\b/i;
+                const kwLender = /lender/i;
                 const test = (s) => kwFull.test(s) || kwEho.test(s);
                 const isVisible = (el) => {
                     try {
                         const style = window.getComputedStyle(el);
                         return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                     } catch(e) { return true; }
+                };
+                const pageHeight = document.body.scrollHeight;
+                const isInFooter = (el) => {
+                    try {
+                        const rect = el.getBoundingClientRect();
+                        const scrollY = window.scrollY || window.pageYOffset;
+                        return (rect.top + scrollY) > (pageHeight * 0.7);
+                    } catch(e) { return false; }
                 };
                 const signals = [];
 
@@ -393,6 +402,49 @@ async def scrape_website(url: str) -> dict:
                         signals.push('img:' + (img.alt || img.src).substring(0, 80));
                 });
 
+                // Check for small square-ish images in footer with no alt text
+                // (common pattern for EHO logos with UUID filenames)
+                document.querySelectorAll('footer img, [class*="footer"] img, [id*="footer"] img').forEach(img => {
+                    if (!isVisible(img)) return;
+                    const w = img.naturalWidth || img.width;
+                    const h = img.naturalHeight || img.height;
+                    // EHO logos are typically 20-80px, roughly square or 2:1 ratio
+                    if (w >= 15 && w <= 120 && h >= 15 && h <= 120) {
+                        const src = (img.src || '').toLowerCase();
+                        const alt = (img.alt || '').toLowerCase();
+                        // Skip known non-EHO images
+                        if (/logo|icon|social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor/i.test(alt + src))
+                            return;
+                        // Already captured above? Skip
+                        if (test(src) || test(alt)) return;
+                        // This is a small footer image with no recognizable alt — potential EHO
+                        signals.push('footer-img:' + w + 'x' + h + ':' + src.substring(src.lastIndexOf('/') + 1, src.lastIndexOf('/') + 40));
+                    }
+                });
+
+                // Also check ALL small images in the bottom 30% of the page
+                document.querySelectorAll('img').forEach(img => {
+                    if (!isVisible(img) || !isInFooter(img)) return;
+                    const w = img.naturalWidth || img.width;
+                    const h = img.naturalHeight || img.height;
+                    if (w >= 15 && w <= 120 && h >= 15 && h <= 120) {
+                        const src = (img.src || '').toLowerCase();
+                        const alt = (img.alt || '').toLowerCase();
+                        if (/logo|icon|social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor/i.test(alt + src))
+                            return;
+                        if (test(src) || test(alt)) return;
+                        // Check if nearby text contains EHO keywords
+                        const parent = img.closest('a, div, span, li, p, footer, section');
+                        if (parent) {
+                            const nearby = (parent.textContent || '').trim();
+                            if (kwFull.test(nearby)) {
+                                const hasLender = kwLender.test(nearby);
+                                signals.push('img-near-eho:' + (hasLender ? 'lender:' : '') + nearby.substring(0, 60));
+                            }
+                        }
+                    }
+                });
+
                 // Check SVG — textContent, aria-label, AND nearby parent text
                 document.querySelectorAll('svg').forEach(svg => {
                     if (!isVisible(svg)) return;
@@ -400,7 +452,6 @@ async def scrape_website(url: str) -> dict:
                     if (test(t)) {
                         signals.push('svg:' + t.substring(0, 80));
                     } else {
-                        // Check parent/sibling text for EHO near a pure-path SVG
                         const parent = svg.closest('a, div, span, li, footer, section');
                         if (parent) {
                             const nearby = parent.textContent || '';
@@ -443,19 +494,6 @@ async def scrape_website(url: str) -> dict:
             except Exception as e:
                 log.warning(f"Failed to load privacy page: {e}")
 
-            # --- Capture footer screenshot for vision analysis ---
-            footer_screenshot_bytes = b""
-            try:
-                page_height = await page.evaluate("() => document.body.scrollHeight")
-                if page_height > 250:
-                    footer_screenshot_bytes = await page.screenshot(
-                        type="png",
-                        clip={"x": 0, "y": max(0, page_height - 250), "width": 1280, "height": 250}
-                    )
-                    log.info(f"Footer screenshot captured: {len(footer_screenshot_bytes)} bytes")
-            except Exception as e:
-                log.warning(f"Footer screenshot failed: {e}")
-
             return {
                 "text": combined,
                 "raw_html": raw_html[:200000],  # cap at 200k chars
@@ -464,7 +502,6 @@ async def scrape_website(url: str) -> dict:
                 "url_final": page.url,
                 "eho_signals": eho_signals,
                 "privacy_page_text": privacy_page_text,
-                "footer_screenshot_bytes": footer_screenshot_bytes,
             }
 
         finally:
@@ -623,44 +660,6 @@ async def lookup_dre_info(license_number: str) -> dict:
 
     _DRE_INFO_CACHE[lic] = info
     return info
-
-
-# ---------------------------------------------------------------------------
-# Footer vision analysis — detect Equal Housing logos in screenshots
-# ---------------------------------------------------------------------------
-async def check_eho_via_vision(footer_bytes: bytes) -> dict:
-    """
-    Use Claude vision to check a footer screenshot for Equal Housing logo.
-    Returns dict with keys: has_ehl (bool), has_eho (bool), raw (str).
-    Falls back gracefully if API key not set or call fails.
-    """
-    if not footer_bytes or len(footer_bytes) < 1000:
-        return {"has_ehl": False, "has_eho": False, "raw": "no_screenshot"}
-    try:
-        import anthropic
-        import base64
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return {"has_ehl": False, "has_eho": False, "raw": "no_api_key"}
-        client = anthropic.Anthropic(api_key=api_key)
-        b64 = base64.b64encode(footer_bytes).decode()
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=50,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
-                    {"type": "text", "text": "Does this website footer contain an Equal Housing logo (house icon with = sign)? If yes, does the text say 'Equal Housing Lender' or 'Equal Housing Opportunity'? Reply with exactly one word: EHL, EHO, or NONE"}
-                ]
-            }]
-        )
-        raw = response.content[0].text.strip().upper()
-        log.info(f"Vision EHO check result: {raw}")
-        return {"has_ehl": "EHL" in raw, "has_eho": "EHO" in raw or "EHL" in raw, "raw": raw}
-    except Exception as e:
-        log.warning(f"Vision EHO check failed: {e}")
-        return {"has_ehl": False, "has_eho": False, "raw": f"error:{e}"}
 
 
 # ---------------------------------------------------------------------------
@@ -890,11 +889,11 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
 
     # 3. Equal Housing Opportunity
     #    Three-tier detection: text regex, HTML img regex, browser DOM signals
-    #    DOM signals are filtered: "svg-nearby" counts as strong, other DOM matches are strong
+    #    DOM signals include: img:, svg:, aria:, svg-nearby:, img-near-eho:, footer-img:
     has_text = bool(EQUAL_HOUSING_RE.search(text))
     has_img  = bool(EHO_IMG_RE.search(html))
     strong_dom = [s for s in (eho_signals or [])
-                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:'))]
+                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:'))]
     has_dom = bool(strong_dom)
     if has_text or has_img or has_dom:
         evidence = ""
@@ -1547,30 +1546,6 @@ async def scan(req: ScanRequest, request: Request):
         ai_check = await check_ai_crawler_blocking(scraped["url_final"])
         rule_results.append(ai_check)
 
-        # --- Vision fallback for EHO/EHL detection ---
-        footer_bytes = scraped.get("footer_screenshot_bytes", b"")
-        eho_check_ids = ("equal_housing", "equal_housing_lender")
-        eho_needs_vision = any(r.id in eho_check_ids and r.status in ("fail", "warn") for r in rule_results)
-        if eho_needs_vision and footer_bytes:
-            vision = await check_eho_via_vision(footer_bytes)
-            if vision.get("has_ehl") or vision.get("has_eho"):
-                for r in rule_results:
-                    if r.id == "equal_housing" and r.status == "fail" and vision.get("has_eho"):
-                        r.status = "pass"
-                        r.description = "Equal Housing Opportunity logo detected via footer screenshot analysis."
-                        r.detail = f"Vision analysis: {vision.get('raw', '')}"
-                        r.fix = ""
-                    elif r.id == "equal_housing_lender":
-                        if r.status == "fail" and vision.get("has_ehl"):
-                            r.status = "pass"
-                            r.description = "Equal Housing Lender logo detected via footer screenshot analysis."
-                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
-                            r.fix = ""
-                        elif r.status == "fail" and vision.get("has_eho"):
-                            r.status = "warn"
-                            r.description = "'Equal Housing Opportunity' logo detected (via screenshot), but mortgage lenders should use 'Equal Housing Lender'."
-                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
-
         # --- Subpage diagnostic: if contact_info failed and we scanned a subpage, add context ---
         from urllib.parse import urlparse
         parsed_url = urlparse(scraped["url_final"])
@@ -1826,30 +1801,6 @@ async def api_scan(req: ApiScanRequest, request: Request):
 
         ai_check = await check_ai_crawler_blocking(final_url)
         rule_results.append(ai_check)
-
-        # --- Vision fallback for EHO/EHL detection ---
-        footer_bytes = scraped.get("footer_screenshot_bytes", b"")
-        eho_check_ids = ("equal_housing", "equal_housing_lender")
-        eho_needs_vision = any(r.id in eho_check_ids and r.status in ("fail", "warn") for r in rule_results)
-        if eho_needs_vision and footer_bytes:
-            vision = await check_eho_via_vision(footer_bytes)
-            if vision.get("has_ehl") or vision.get("has_eho"):
-                for r in rule_results:
-                    if r.id == "equal_housing" and r.status == "fail" and vision.get("has_eho"):
-                        r.status = "pass"
-                        r.description = "Equal Housing Opportunity logo detected via footer screenshot analysis."
-                        r.detail = f"Vision analysis: {vision.get('raw', '')}"
-                        r.fix = ""
-                    elif r.id == "equal_housing_lender":
-                        if r.status == "fail" and vision.get("has_ehl"):
-                            r.status = "pass"
-                            r.description = "Equal Housing Lender logo detected via footer screenshot analysis."
-                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
-                            r.fix = ""
-                        elif r.status == "fail" and vision.get("has_eho"):
-                            r.status = "warn"
-                            r.description = "'Equal Housing Opportunity' logo detected (via screenshot), but mortgage lenders should use 'Equal Housing Lender'."
-                            r.detail = f"Vision analysis: {vision.get('raw', '')}"
 
         # --- Subpage diagnostic ---
         from urllib.parse import urlparse
