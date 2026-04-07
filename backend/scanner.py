@@ -125,6 +125,184 @@ def make_fingerprint(ip: str, email: str) -> str:
 
 ADMIN_EMAILS = {"mike@thecolyerteam.com", "mjcolyer@gmail.com"}
 
+# ---------------------------------------------------------------------------
+# Review Queue config
+# ---------------------------------------------------------------------------
+# Rules that trigger auto-population into the review queue.
+# These are the rule_ids where the scanner's result is ambiguous and needs human eyes.
+# Matches rules that set screenshot_required=true in rule_engine.py (R02, R03, R05, R10, R15, R16, R18)
+REVIEW_QUEUE_RULES = {
+    "responsible_broker",      # R02 — ambiguous broker disclosure
+    "safe_nmls",               # R03 — NMLS format edge cases
+    "ab723_images",            # R05 — altered image disclosure
+    "physical_address",        # R10 — address regex false positives
+    "equal_housing_lender",    # R15 — EHO vs EHL, image-only logos
+    "dfpi_prohibited",         # R16 — borderline advertising claims
+    "nmls_consumer_access",    # R18 — link presence ambiguity
+    "equal_housing",           # RE equivalent of R15
+}
+# Future allowlist for rules that don't set screenshot_required but may need review
+REVIEW_QUEUE_EXTRA_RULES: set = set()  # e.g., {"ccpa_privacy", "tila_apr"}
+
+SCANNER_VERSION = "v1.2"
+
+
+# ---------------------------------------------------------------------------
+# Admin auth middleware
+# ---------------------------------------------------------------------------
+async def verify_admin(request: Request) -> str:
+    """Extract JWT from Authorization header, verify admin role. Returns user_id or raises 403."""
+    auth_header = request.headers.get("Authorization", "")
+    # Also accept X-API-Key for admin access (batch scripts)
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key and api_key in API_KEYS:
+        return "api_key_admin"
+
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Admin access required. Provide Authorization: Bearer <jwt> header.")
+    token = auth_header.split(" ", 1)[1]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={"Authorization": f"Bearer {token}", "apikey": SUPABASE_SERVICE_KEY}
+            )
+            if r.status_code != 200:
+                raise HTTPException(status_code=403, detail="Invalid or expired token")
+            user = r.json()
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                params={"id": f"eq.{user['id']}", "select": "role"}
+            )
+            profiles = r.json()
+        if not profiles or profiles[0].get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin role required")
+        return user["id"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"Admin auth failed: {e}")
+        raise HTTPException(status_code=403, detail="Admin authentication failed")
+
+
+# ---------------------------------------------------------------------------
+# Review Queue population
+# ---------------------------------------------------------------------------
+async def _populate_review_queue(
+    scan_id: str,
+    site_url: str,
+    page_url: str,
+    profession: str,
+    entity_type: str,
+    score: int,
+    rule_results: list,
+    screenshot_hex: str = "",
+):
+    """
+    Auto-populate review_queue with ambiguous scanner results.
+    Only inserts rules in REVIEW_QUEUE_RULES or REVIEW_QUEUE_EXTRA_RULES
+    that have status 'fail' or 'warn'. Uses ON CONFLICT DO NOTHING for dedup.
+    """
+    review_rules = REVIEW_QUEUE_RULES | REVIEW_QUEUE_EXTRA_RULES
+    items_to_insert = []
+
+    for r in rule_results:
+        if r.id not in review_rules:
+            continue
+        if r.status not in ("fail", "warn"):
+            continue
+        items_to_insert.append({
+            "scan_id": scan_id,
+            "site_url": site_url,
+            "page_url": page_url,
+            "profession": profession,
+            "entity_type": entity_type,
+            "score": score,
+            "rule_id": r.id,
+            "rule_name": r.name,
+            "scanner_status": r.status,
+            "scanner_detail": f"{r.description} {r.detail}".strip(),
+            "scanner_evidence": r.detail[:500] if r.detail else "",
+            "scanner_version": SCANNER_VERSION,
+            "rule_version": SCANNER_VERSION,
+            "review_status": "pending",
+            "source": "auto",
+        })
+
+    if not items_to_insert:
+        return
+
+    # Insert with ON CONFLICT DO NOTHING (dedup on site_url + rule_id for pending/claimed)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/review_queue",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=ignore-duplicates",
+                },
+                json=items_to_insert,
+            )
+            if r.status_code >= 300:
+                log.warning(f"Review queue insert failed: {r.status_code} {r.text[:200]}")
+            else:
+                log.info(f"Review queue: inserted {len(items_to_insert)} items for {site_url}")
+    except Exception as e:
+        log.warning(f"Review queue population failed: {e}")
+
+    # Upload screenshot to Supabase Storage if available
+    if screenshot_hex and items_to_insert:
+        try:
+            screenshot_bytes = bytes.fromhex(screenshot_hex)
+            storage_path = f"{scan_id}_page.jpg"
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    f"{SUPABASE_URL}/storage/v1/object/review-assets/{storage_path}",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "image/jpeg",
+                    },
+                    content=screenshot_bytes,
+                )
+                if r.status_code < 300:
+                    log.info(f"Screenshot uploaded: review-assets/{storage_path}")
+                    # Link screenshot to all queue items from this scan
+                    # Get the IDs of items just inserted
+                    async with httpx.AsyncClient(timeout=10) as client2:
+                        r2 = await client2.get(
+                            f"{SUPABASE_URL}/rest/v1/review_queue",
+                            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                            params={"scan_id": f"eq.{scan_id}", "select": "id"},
+                        )
+                        if r2.status_code == 200:
+                            queue_ids = [row["id"] for row in r2.json()]
+                            asset_rows = [{
+                                "review_item_id": qid,
+                                "asset_type": "screenshot",
+                                "storage_path": f"review-assets/{storage_path}",
+                                "mime_type": "image/jpeg",
+                                "caption": "Auto-captured page screenshot",
+                            } for qid in queue_ids]
+                            if asset_rows:
+                                await client2.post(
+                                    f"{SUPABASE_URL}/rest/v1/review_assets",
+                                    headers={
+                                        "apikey": SUPABASE_SERVICE_KEY,
+                                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                                        "Content-Type": "application/json",
+                                        "Prefer": "return=minimal",
+                                    },
+                                    json=asset_rows,
+                                )
+        except Exception as e:
+            log.warning(f"Screenshot upload failed: {e}")
+
+
 async def check_scan_allowed(ip: str, email: str, user_id: Optional[str]) -> tuple[bool, str]:
     """
     Returns (allowed, reason).
@@ -1628,6 +1806,21 @@ async def scan(req: ScanRequest, request: Request):
 
         await update_scan_status(scan_id, "completed", result=response)
 
+        # Populate review queue for ambiguous results (fire-and-forget)
+        try:
+            await _populate_review_queue(
+                scan_id=scan_id,
+                site_url=url,
+                page_url=scraped.get("url_final", url),
+                profession=req.profession,
+                entity_type=entity_type,
+                score=score,
+                rule_results=rule_results,
+                screenshot_hex=scraped.get("screenshot_hex", ""),
+            )
+        except Exception as e:
+            log.warning(f"Review queue population failed (non-blocking): {e}")
+
         # Record fingerprint for free scans
         if is_free and scan_id:
             await record_fingerprint(ip, req.email, scan_id)
@@ -1703,6 +1896,384 @@ async def get_scan(scan_id: str):
         "is_free_scan": row.get("is_free_scan", True),
         "checks": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Admin Review Queue Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/queue")
+async def admin_list_queue(request: Request):
+    """List review queue items with filters and pagination."""
+    admin_id = await verify_admin(request)
+
+    # Parse query params
+    params = dict(request.query_params)
+    review_status = params.get("review_status", "pending")
+    rule_id = params.get("rule_id")
+    profession = params.get("profession")
+    bug_tag = params.get("bug_tag")
+    claimed_by = params.get("claimed_by")
+    page = int(params.get("page", "0"))
+    per_page = min(int(params.get("per_page", "50")), 100)
+
+    # Build Supabase query
+    query_params = {
+        "select": "*",
+        "order": "created_at.desc",
+        "offset": str(page * per_page),
+        "limit": str(per_page),
+    }
+    if review_status:
+        query_params["review_status"] = f"eq.{review_status}"
+    if rule_id:
+        query_params["rule_id"] = f"eq.{rule_id}"
+    if profession:
+        query_params["profession"] = f"eq.{profession}"
+    if bug_tag:
+        query_params["bug_tag"] = f"eq.{bug_tag}"
+    if claimed_by:
+        query_params["claimed_by"] = f"eq.{claimed_by}"
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Prefer": "count=exact",
+            },
+            params=query_params,
+        )
+    items = r.json() if r.status_code == 200 else []
+    # Extract total count from Content-Range header
+    content_range = r.headers.get("content-range", "")
+    total = int(content_range.split("/")[-1]) if "/" in content_range else len(items)
+
+    return {"items": items, "total": total, "page": page, "per_page": per_page}
+
+
+@app.get("/admin/queue/stats")
+async def admin_queue_stats(request: Request):
+    """Get aggregate queue statistics."""
+    await verify_admin(request)
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/review_queue_stats",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+        )
+    return r.json() if r.status_code == 200 else []
+
+
+@app.get("/admin/queue/{item_id}")
+async def admin_get_queue_item(item_id: str, request: Request):
+    """Get review queue item detail with assets and full scan context."""
+    await verify_admin(request)
+
+    # Get the queue item
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            params={"id": f"eq.{item_id}", "select": "*"},
+        )
+    items = r.json()
+    if not items:
+        raise HTTPException(404, "Review item not found")
+    item = items[0]
+
+    # Get assets
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/review_assets",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            params={"review_item_id": f"eq.{item_id}", "select": "*"},
+        )
+    assets = r.json() if r.status_code == 200 else []
+
+    # Get full scan result for context (all rules from the same scan)
+    scan_context = None
+    if item.get("scan_id"):
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/scans",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                params={"id": f"eq.{item['scan_id']}", "select": "result"},
+            )
+            scans = r.json()
+            if scans and scans[0].get("result"):
+                result = scans[0]["result"]
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except:
+                        pass
+                scan_context = result
+
+    return {"item": item, "assets": assets, "scan_context": scan_context}
+
+
+class ReviewDecision(BaseModel):
+    decision: Optional[str] = None
+    reviewer_note: Optional[str] = None
+    bug_tag: Optional[str] = None
+    review_status: Optional[str] = None
+
+
+@app.patch("/admin/queue/{item_id}")
+async def admin_decide_queue_item(item_id: str, body: ReviewDecision, request: Request):
+    """Submit a review decision for a queue item."""
+    admin_id = await verify_admin(request)
+
+    payload = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    if body.decision:
+        payload["decision"] = body.decision
+        payload["reviewer_id"] = admin_id if admin_id != "api_key_admin" else None
+        payload["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        payload["review_status"] = "completed"
+    if body.reviewer_note is not None:
+        payload["reviewer_note"] = body.reviewer_note
+    if body.bug_tag is not None:
+        payload["bug_tag"] = body.bug_tag
+    if body.review_status:
+        payload["review_status"] = body.review_status
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            params={"id": f"eq.{item_id}"},
+            json=payload,
+        )
+    if r.status_code >= 300:
+        raise HTTPException(r.status_code, f"Failed to update: {r.text[:200]}")
+    return {"ok": True}
+
+
+@app.patch("/admin/queue/{item_id}/claim")
+async def admin_claim_queue_item(item_id: str, request: Request):
+    """Claim a review item (sets claimed_by and review_status='claimed')."""
+    admin_id = await verify_admin(request)
+    payload = {
+        "review_status": "claimed",
+        "claimed_by": admin_id if admin_id != "api_key_admin" else None,
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            params={"id": f"eq.{item_id}"},
+            json=payload,
+        )
+    return {"ok": True}
+
+
+@app.patch("/admin/queue/{item_id}/release")
+async def admin_release_queue_item(item_id: str, request: Request):
+    """Release a claimed review item back to pending."""
+    await verify_admin(request)
+    payload = {
+        "review_status": "pending",
+        "claimed_by": None,
+        "claimed_at": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
+            params={"id": f"eq.{item_id}"},
+            json=payload,
+        )
+    return {"ok": True}
+
+
+class BulkDecision(BaseModel):
+    item_ids: list[str]
+    decision: str
+    reviewer_note: Optional[str] = None
+    bug_tag: Optional[str] = None
+
+
+@app.post("/admin/queue/bulk")
+async def admin_bulk_decide(body: BulkDecision, request: Request):
+    """Bulk decide multiple review items at once."""
+    admin_id = await verify_admin(request)
+    payload = {
+        "decision": body.decision,
+        "reviewer_id": admin_id if admin_id != "api_key_admin" else None,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "review_status": "completed",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if body.reviewer_note:
+        payload["reviewer_note"] = body.reviewer_note
+    if body.bug_tag:
+        payload["bug_tag"] = body.bug_tag
+
+    updated = 0
+    for item_id in body.item_ids:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.patch(
+                f"{SUPABASE_URL}/rest/v1/review_queue",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                params={"id": f"eq.{item_id}"},
+                json=payload,
+            )
+            if r.status_code < 300:
+                updated += 1
+    return {"ok": True, "updated": updated}
+
+
+@app.post("/admin/queue/{item_id}/assets")
+async def admin_upload_asset(item_id: str, request: Request):
+    """Upload a screenshot or attachment for a review item."""
+    admin_id = await verify_admin(request)
+
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(400, "No file provided")
+
+    content = await file.read()
+    filename = getattr(file, "filename", "upload.jpg")
+    mime_type = getattr(file, "content_type", "image/jpeg")
+    storage_path = f"review-assets/{item_id}_{filename}"
+
+    # Upload to Supabase Storage
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(
+            f"{SUPABASE_URL}/storage/v1/object/{storage_path}",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": mime_type,
+            },
+            content=content,
+        )
+    if r.status_code >= 300:
+        raise HTTPException(500, f"Storage upload failed: {r.text[:200]}")
+
+    # Create asset record
+    asset = {
+        "review_item_id": item_id,
+        "asset_type": "screenshot",
+        "storage_path": storage_path,
+        "filename": filename,
+        "mime_type": mime_type,
+        "uploaded_by": admin_id if admin_id != "api_key_admin" else None,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/review_assets",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=[asset],
+        )
+    created = r.json() if r.status_code < 300 else []
+    return {"ok": True, "asset": created[0] if created else asset}
+
+
+@app.post("/admin/queue/populate")
+async def admin_populate_queue(request: Request):
+    """Manually populate review queue from a specific scan."""
+    admin_id = await verify_admin(request)
+    body = await request.json()
+    scan_id = body.get("scan_id")
+    rule_ids = body.get("rule_ids")  # optional filter
+
+    if not scan_id:
+        raise HTTPException(400, "scan_id required")
+
+    # Get the scan result
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/scans",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            params={"id": f"eq.{scan_id}", "select": "url,result,status"},
+        )
+    scans = r.json()
+    if not scans:
+        raise HTTPException(404, "Scan not found")
+
+    scan = scans[0]
+    result = scan.get("result")
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except:
+            raise HTTPException(400, "Scan result is not valid JSON")
+
+    if not result or not result.get("checks"):
+        raise HTTPException(400, "Scan has no check results")
+
+    # Build RuleResult-like objects from the stored JSON
+    checks = result.get("checks", [])
+    items_to_insert = []
+    for c in checks:
+        if rule_ids and c["id"] not in rule_ids:
+            continue
+        if c["status"] not in ("fail", "warn"):
+            continue
+        items_to_insert.append({
+            "scan_id": scan_id,
+            "site_url": scan.get("url", result.get("url", "")),
+            "page_url": result.get("url", ""),
+            "profession": result.get("profession", ""),
+            "entity_type": result.get("entity_type", "standard"),
+            "score": result.get("score"),
+            "rule_id": c["id"],
+            "rule_name": c["name"],
+            "scanner_status": c["status"],
+            "scanner_detail": f"{c.get('description', '')} {c.get('detail', '')}".strip(),
+            "scanner_evidence": c.get("detail", "")[:500],
+            "scanner_version": SCANNER_VERSION,
+            "rule_version": SCANNER_VERSION,
+            "review_status": "pending",
+            "source": "manual",
+        })
+
+    if not items_to_insert:
+        return {"ok": True, "inserted": 0, "message": "No fail/warn checks to queue"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=ignore-duplicates",
+            },
+            json=items_to_insert,
+        )
+    return {"ok": True, "inserted": len(items_to_insert)}
 
 
 # --- Health check ---
@@ -1882,6 +2453,21 @@ async def api_scan(req: ApiScanRequest, request: Request):
         }
 
         await update_scan_status(scan_id, "completed", result=response)
+
+        # Populate review queue for ambiguous results (fire-and-forget)
+        try:
+            await _populate_review_queue(
+                scan_id=scan_id,
+                site_url=req.url.strip(),
+                page_url=final_url,
+                profession=req.profession,
+                entity_type=entity_type,
+                score=score,
+                rule_results=rule_results,
+                screenshot_hex=scraped.get("screenshot_hex", ""),
+            )
+        except Exception as e:
+            log.warning(f"[api_scan] Review queue population failed (non-blocking): {e}")
 
         # Send email if provided
         if req.email:
