@@ -32,7 +32,10 @@ export default function ReviewItem() {
   const [bugTag, setBugTag] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
-  const [neighbors, setNeighbors] = useState<{ prev: string | null; next: string | null }>({ prev: null, next: null })
+  // All queue items for the same site (for intra-site navigation)
+  const [siteItems, setSiteItems] = useState<ReviewItemType[]>([])
+  // Neighboring sites in the global queue (for inter-site navigation)
+  const [nextSiteItemId, setNextSiteItemId] = useState<string | null>(null)
 
   const loadItem = useCallback(async () => {
     if (!itemId) return
@@ -48,14 +51,17 @@ export default function ReviewItem() {
       if (result.item.reviewer_note) setNote(result.item.reviewer_note)
       if (result.item.bug_tag) setBugTag(result.item.bug_tag)
 
-      // Load queue neighbors for prev/next navigation
-      const queueData = await getReviewQueue({ review_status: 'pending', per_page: 100 })
-      const allIds = queueData.items.map((i: ReviewItemType) => i.id)
-      const idx = allIds.indexOf(itemId)
-      setNeighbors({
-        prev: idx > 0 ? allIds[idx - 1] : null,
-        next: idx < allIds.length - 1 ? allIds[idx + 1] : null,
-      })
+      // Load ALL queue items (pending + completed) for the same site
+      const siteUrl = result.item.site_url
+      const allData = await getReviewQueue({ per_page: 100, review_status: '' })
+      const sameSite = allData.items.filter((i: ReviewItemType) => i.site_url === siteUrl)
+      setSiteItems(sameSite)
+
+      // Find the next site's first pending item (for after completing all items on this site)
+      const otherSitePending = allData.items.find(
+        (i: ReviewItemType) => i.site_url !== siteUrl && i.review_status === 'pending'
+      )
+      setNextSiteItemId(otherSitePending?.id || null)
     } catch (e) {
       setError('Failed to load item')
     }
@@ -63,6 +69,16 @@ export default function ReviewItem() {
   }, [itemId])
 
   useEffect(() => { loadItem() }, [loadItem])
+
+  // Find next unreviewed item on the same site
+  function getNextUnreviewedOnSite(): string | null {
+    const unreviewed = siteItems.filter(i => i.review_status === 'pending' && i.id !== itemId)
+    // Prioritize fails over warns
+    const fails = unreviewed.filter(i => i.scanner_status === 'fail')
+    if (fails.length > 0) return fails[0].id
+    if (unreviewed.length > 0) return unreviewed[0].id
+    return null
+  }
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -89,12 +105,16 @@ export default function ReviewItem() {
         handleSubmit()
         return
       }
-      if (e.key === '[' && neighbors.prev) {
-        navigate(`/admin/queue/${neighbors.prev}`)
+      if (e.key === '[') {
+        // Previous rule on same site
+        const idx = siteItems.findIndex(i => i.id === itemId)
+        if (idx > 0) navigate(`/admin/queue/${siteItems[idx - 1].id}`)
         return
       }
-      if (e.key === ']' && neighbors.next) {
-        navigate(`/admin/queue/${neighbors.next}`)
+      if (e.key === ']') {
+        // Next rule on same site
+        const idx = siteItems.findIndex(i => i.id === itemId)
+        if (idx < siteItems.length - 1) navigate(`/admin/queue/${siteItems[idx + 1].id}`)
         return
       }
       if (e.key === 'Escape') {
@@ -112,9 +132,12 @@ export default function ReviewItem() {
     setError('')
     try {
       await submitDecision(itemId, selectedDecision, note, bugTag)
-      // Advance to next item if available, otherwise go back to queue
-      if (neighbors.next) {
-        navigate(`/admin/queue/${neighbors.next}`)
+      // Advance: next unreviewed rule on same site → next site → back to queue
+      const nextOnSite = getNextUnreviewedOnSite()
+      if (nextOnSite) {
+        navigate(`/admin/queue/${nextOnSite}`)
+      } else if (nextSiteItemId) {
+        navigate(`/admin/queue/${nextSiteItemId}`)
       } else {
         navigate('/admin/queue')
       }
@@ -192,20 +215,29 @@ export default function ReviewItem() {
             &larr; Back to Queue
           </button>
           <div className="flex gap-2">
-            <button
-              onClick={() => neighbors.prev && navigate(`/admin/queue/${neighbors.prev}`)}
-              disabled={!neighbors.prev}
-              className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-30"
-            >
-              [ Prev
-            </button>
-            <button
-              onClick={() => neighbors.next && navigate(`/admin/queue/${neighbors.next}`)}
-              disabled={!neighbors.next}
-              className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-30"
-            >
-              Next ]
-            </button>
+            {(() => {
+              const idx = siteItems.findIndex(i => i.id === itemId)
+              const hasPrev = idx > 0
+              const hasNext = idx < siteItems.length - 1
+              return (
+                <>
+                  <button
+                    onClick={() => hasPrev && navigate(`/admin/queue/${siteItems[idx - 1].id}`)}
+                    disabled={!hasPrev}
+                    className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-30"
+                  >
+                    [ Prev Rule
+                  </button>
+                  <button
+                    onClick={() => hasNext && navigate(`/admin/queue/${siteItems[idx + 1].id}`)}
+                    disabled={!hasNext}
+                    className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-30"
+                  >
+                    Next Rule ]
+                  </button>
+                </>
+              )
+            })()}
             {item.review_status === 'pending' && (
               <button onClick={handleClaim} className="px-3 py-1.5 text-sm bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200">
                 Claim
@@ -270,22 +302,41 @@ export default function ReviewItem() {
               )}
             </div>
 
-            {/* All checks for this site */}
+            {/* All rules for this site — clickable navigation */}
             {allChecks.length > 0 && (
               <div className="bg-white rounded-xl border p-4">
                 <h3 className="font-semibold text-gray-700 mb-2">All Rules (this scan)</h3>
                 <div className="space-y-1">
-                  {allChecks.map((c: any) => (
-                    <div key={c.id} className={`flex items-center gap-2 text-sm py-1 px-2 rounded ${
-                      c.id === item.rule_id ? 'bg-yellow-50 font-semibold' : ''
-                    }`}>
-                      <span className={`w-12 text-xs font-bold ${STATUS_COLORS[c.status]}`}>
-                        {c.status.toUpperCase()}
-                      </span>
-                      <span className="text-gray-700">{c.id}</span>
-                      {c.id === item.rule_id && <span className="text-yellow-600 text-xs">&larr; reviewing</span>}
-                    </div>
-                  ))}
+                  {allChecks.map((c: any) => {
+                    const queueItem = siteItems.find(si => si.rule_id === c.id)
+                    const isReviewing = c.id === item.rule_id
+                    const isCompleted = queueItem?.review_status === 'completed'
+                    const isInQueue = !!queueItem && !isCompleted
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => queueItem && navigate(`/admin/queue/${queueItem.id}`)}
+                        className={`flex items-center gap-2 text-sm py-1.5 px-2 rounded transition-colors ${
+                          isReviewing ? 'bg-yellow-50 font-semibold' :
+                          queueItem ? 'hover:bg-blue-50 cursor-pointer' : ''
+                        }`}
+                      >
+                        <span className={`w-12 text-xs font-bold ${STATUS_COLORS[c.status]}`}>
+                          {c.status.toUpperCase()}
+                        </span>
+                        <span className={`flex-1 ${queueItem ? 'text-gray-700' : 'text-gray-400'}`}>{c.id}</span>
+                        {isReviewing && <span className="text-yellow-600 text-xs font-medium">&larr;</span>}
+                        {isCompleted && (
+                          <span className="text-xs text-green-600 font-medium">
+                            ✓ {queueItem.reviewed_at ? new Date(queueItem.reviewed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'done'}
+                          </span>
+                        )}
+                        {isInQueue && !isReviewing && (
+                          <span className="text-xs text-orange-500">pending</span>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             )}
