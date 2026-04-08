@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import Navbar from '../../components/Navbar'
 import {
   getQueueItem, getReviewQueue, submitDecision, claimItem, releaseItem, uploadAsset, getAssetUrl,
-  DECISIONS, REVIEWER_HINTS,
+  DECISIONS, REVIEWER_HINTS, BUG_TAGS,
   type QueueDetailResponse, type ReviewItem as ReviewItemType, type ReviewAsset,
 } from '../../lib/adminApi'
 
@@ -432,14 +432,26 @@ export default function ReviewItem() {
             onChange={e => setNote(e.target.value)}
             className="border rounded-lg px-3 py-2 text-sm w-48"
           />
-          <input
-            id="tag-field"
-            type="text"
-            placeholder="Bug tag (t)"
-            value={bugTag}
-            onChange={e => setBugTag(e.target.value)}
-            className="border rounded-lg px-3 py-2 text-sm w-32"
-          />
+          <div className="relative group">
+            <select
+              id="tag-field"
+              value={bugTag}
+              onChange={e => setBugTag(e.target.value)}
+              className="border rounded-lg px-3 py-2 text-sm w-44 bg-white appearance-none cursor-pointer"
+            >
+              <option value="">Bug tag (t)</option>
+              {BUG_TAGS.map(tag => (
+                <option key={tag.key} value={tag.key} title={tag.tooltip}>
+                  {tag.label}
+                </option>
+              ))}
+            </select>
+            {bugTag && (
+              <div className="absolute bottom-full left-0 mb-2 w-72 bg-gray-900 text-white text-xs rounded-lg px-3 py-2 shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                {BUG_TAGS.find(t => t.key === bugTag)?.tooltip || bugTag}
+              </div>
+            )}
+          </div>
 
           {/* Submit */}
           <button

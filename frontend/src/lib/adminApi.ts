@@ -181,6 +181,25 @@ export const DECISIONS = [
   { key: 'scanner_bug', label: 'Bug', shortcut: '5', color: 'purple' },
 ] as const
 
+// Bug tags — predefined categories for scanner improvement tracking
+export const BUG_TAGS = [
+  { key: 'eho_image_no_alt', label: 'EHO Image (no alt)', tooltip: 'Equal Housing logo is an image with no alt text or a UUID filename. Scanner can\'t detect it without text.' },
+  { key: 'eho_svg', label: 'EHO in SVG', tooltip: 'Equal Housing logo rendered as an SVG with no text content. Scanner checks SVG textContent but this one has only paths.' },
+  { key: 'eho_font_icon', label: 'EHO Font Icon', tooltip: 'Equal Housing logo is a CSS font icon (e.g., ssi-eho class). Scanner may miss these.' },
+  { key: 'eho_vs_ehl', label: 'EHO vs EHL', tooltip: 'Site shows "Equal Housing Opportunity" but as a lender should show "Equal Housing Lender". Scanner didn\'t distinguish.' },
+  { key: 'js_rendering', label: 'JS Rendering', tooltip: 'Content is in a JS-rendered footer that Playwright didn\'t fully capture. Common on KW, Compass, Wix, Squarespace.' },
+  { key: 'subpage_content', label: 'Subpage Content', tooltip: 'The compliance element exists on a subpage (e.g., /privacy, /contact, /about) but scanner only checked the homepage.' },
+  { key: 'redirect_issue', label: 'Redirect Issue', tooltip: 'Site redirected to a different URL and scanner evaluated the wrong page or lost content during redirect.' },
+  { key: 'entity_misclass', label: 'Entity Misclass', tooltip: 'Scanner classified this entity incorrectly (e.g., nonprofit flagged as brokerage, or commercial lender flagged for residential rules).' },
+  { key: 'regex_miss', label: 'Regex Miss', tooltip: 'The compliance text/number IS on the page but the scanner\'s regex pattern didn\'t match it. Non-standard format.' },
+  { key: 'placeholder_data', label: 'Placeholder Data', tooltip: 'Scanner detected placeholder/template content (e.g., example@domain.com, (123)456-7890) as real data.' },
+  { key: 'parked_domain', label: 'Parked/Dead Domain', tooltip: 'Site is parked, suspended, or redirects to an unrelated business. Should not be scored.' },
+  { key: 'dre_lookup_error', label: 'DRE Lookup Error', tooltip: 'The DRE public lookup returned wrong info, timed out, or misidentified the license type.' },
+  { key: 'ccpa_on_subpage', label: 'CCPA on Subpage', tooltip: 'Privacy policy has CCPA content but scanner didn\'t find it because the privacy page link wasn\'t followed or rendered.' },
+  { key: 'false_trigger', label: 'False TILA Trigger', tooltip: 'Scanner flagged TILA/Reg Z but the "triggering terms" are generic marketing language, not actual rate/payment ads.' },
+  { key: 'other', label: 'Other', tooltip: 'Doesn\'t fit any predefined category. Add details in the note field.' },
+] as const
+
 // Reviewer hints per rule_id
 export const REVIEWER_HINTS: Record<string, string> = {
   equal_housing: "Look for EHO logo in footer \u2014 may be SVG, image with no alt, or font-icon (ssi-eho class).",
