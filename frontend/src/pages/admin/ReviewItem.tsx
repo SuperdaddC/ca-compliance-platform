@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import Navbar from '../../components/Navbar'
 import {
-  getQueueItem, submitDecision, claimItem, releaseItem, uploadAsset, getAssetUrl,
+  getQueueItem, getReviewQueue, submitDecision, claimItem, releaseItem, uploadAsset, getAssetUrl,
   DECISIONS, REVIEWER_HINTS,
-  type QueueDetailResponse, type ReviewAsset,
+  type QueueDetailResponse, type ReviewItem as ReviewItemType, type ReviewAsset,
 } from '../../lib/adminApi'
 
 const STATUS_COLORS: Record<string, string> = {
@@ -32,16 +32,30 @@ export default function ReviewItem() {
   const [bugTag, setBugTag] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [neighbors, setNeighbors] = useState<{ prev: string | null; next: string | null }>({ prev: null, next: null })
 
   const loadItem = useCallback(async () => {
     if (!itemId) return
     setLoading(true)
+    setSelectedDecision('')
+    setNote('')
+    setBugTag('')
+    setError('')
     try {
       const result = await getQueueItem(itemId)
       setData(result)
       if (result.item.decision) setSelectedDecision(result.item.decision)
       if (result.item.reviewer_note) setNote(result.item.reviewer_note)
       if (result.item.bug_tag) setBugTag(result.item.bug_tag)
+
+      // Load queue neighbors for prev/next navigation
+      const queueData = await getReviewQueue({ review_status: 'pending', per_page: 100 })
+      const allIds = queueData.items.map((i: ReviewItemType) => i.id)
+      const idx = allIds.indexOf(itemId)
+      setNeighbors({
+        prev: idx > 0 ? allIds[idx - 1] : null,
+        next: idx < allIds.length - 1 ? allIds[idx + 1] : null,
+      })
     } catch (e) {
       setError('Failed to load item')
     }
@@ -75,6 +89,14 @@ export default function ReviewItem() {
         handleSubmit()
         return
       }
+      if (e.key === '[' && neighbors.prev) {
+        navigate(`/admin/queue/${neighbors.prev}`)
+        return
+      }
+      if (e.key === ']' && neighbors.next) {
+        navigate(`/admin/queue/${neighbors.next}`)
+        return
+      }
       if (e.key === 'Escape') {
         navigate('/admin/queue')
         return
@@ -90,7 +112,12 @@ export default function ReviewItem() {
     setError('')
     try {
       await submitDecision(itemId, selectedDecision, note, bugTag)
-      navigate('/admin/queue')
+      // Advance to next item if available, otherwise go back to queue
+      if (neighbors.next) {
+        navigate(`/admin/queue/${neighbors.next}`)
+      } else {
+        navigate('/admin/queue')
+      }
     } catch (e: any) {
       setError(e.message || 'Failed to submit')
     }
@@ -165,6 +192,20 @@ export default function ReviewItem() {
             &larr; Back to Queue
           </button>
           <div className="flex gap-2">
+            <button
+              onClick={() => neighbors.prev && navigate(`/admin/queue/${neighbors.prev}`)}
+              disabled={!neighbors.prev}
+              className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-30"
+            >
+              [ Prev
+            </button>
+            <button
+              onClick={() => neighbors.next && navigate(`/admin/queue/${neighbors.next}`)}
+              disabled={!neighbors.next}
+              className="px-3 py-1.5 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 disabled:opacity-30"
+            >
+              Next ]
+            </button>
             {item.review_status === 'pending' && (
               <button onClick={handleClaim} className="px-3 py-1.5 text-sm bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200">
                 Claim
@@ -359,7 +400,7 @@ export default function ReviewItem() {
           </button>
         </div>
         <div className="max-w-7xl mx-auto mt-1 text-xs text-gray-400">
-          1-5 select decision | n=note | t=tag | Ctrl+Enter=submit | Esc=back
+          1-5 select | n=note | t=tag | Ctrl+Enter=submit &amp; next | [/]=prev/next | Esc=back
         </div>
       </div>
     </div>
