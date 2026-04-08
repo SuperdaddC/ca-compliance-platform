@@ -13,6 +13,8 @@ import CheckoutSuccess from './pages/CheckoutSuccess'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Badge from './pages/Badge'
+import ReviewQueue from './pages/admin/ReviewQueue'
+import ReviewItem from './pages/admin/ReviewItem'
 
 // Auth context
 interface AuthContextType {
@@ -106,6 +108,20 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user, role, loading } = useAuth()
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white">
+        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-gold"></div>
+      </div>
+    )
+  }
+  if (!user) return <Navigate to="/login" replace />
+  if (role !== 'admin') return <Navigate to="/dashboard" replace />
+  return <>{children}</>
+}
+
 export default function App() {
   return (
     <AuthProvider>
@@ -128,6 +144,8 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+          <Route path="/admin/queue" element={<AdminRoute><ReviewQueue /></AdminRoute>} />
+          <Route path="/admin/queue/:itemId" element={<AdminRoute><ReviewItem /></AdminRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

@@ -2,7 +2,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../App'
 
 export default function Navbar() {
-  const { user, signOut } = useAuth()
+  const { user, role, signOut } = useAuth()
   const navigate = useNavigate()
 
   function handlePricingClick(e: React.MouseEvent) {
@@ -40,6 +40,11 @@ export default function Navbar() {
               <Link to="/dashboard" className="text-sm font-medium text-gray-600 hover:text-brand-blue transition-colors">
                 Dashboard
               </Link>
+              {role === 'admin' && (
+                <Link to="/admin/queue" className="text-sm font-medium text-purple-600 hover:text-purple-800 transition-colors">
+                  Admin
+                </Link>
+              )}
               <button
                 onClick={signOut}
                 className="text-sm font-medium text-gray-500 hover:text-red-600 transition-colors"
