@@ -1910,7 +1910,7 @@ async def admin_list_queue(request: Request):
 
     # Parse query params
     params = dict(request.query_params)
-    review_status = params.get("review_status", "pending")
+    review_status = params.get("review_status", "")
     rule_id = params.get("rule_id")
     profession = params.get("profession")
     bug_tag = params.get("bug_tag")

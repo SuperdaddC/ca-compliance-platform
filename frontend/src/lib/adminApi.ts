@@ -89,7 +89,7 @@ export interface QueueFilters {
 
 export async function getReviewQueue(filters: QueueFilters = {}): Promise<QueueListResponse> {
   const params = new URLSearchParams()
-  if (filters.review_status) params.set('review_status', filters.review_status)
+  if (filters.review_status !== undefined) params.set('review_status', filters.review_status)
   if (filters.rule_id) params.set('rule_id', filters.rule_id)
   if (filters.profession) params.set('profession', filters.profession)
   if (filters.bug_tag) params.set('bug_tag', filters.bug_tag)
