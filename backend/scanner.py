@@ -1936,19 +1936,32 @@ async def admin_list_queue(request: Request):
     if claimed_by:
         query_params["claimed_by"] = f"eq.{claimed_by}"
 
+    supabase_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+
+    # Get items
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
             f"{SUPABASE_URL}/rest/v1/review_queue",
-            headers={
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Prefer": "count=exact",
-            },
+            headers=supabase_headers,
             params=query_params,
         )
-    items = r.json() if r.status_code == 200 else []
-    # Extract total count from Content-Range header
-    content_range = r.headers.get("content-range", "")
+    items = r.json() if r.status_code < 300 else []
+    if not isinstance(items, list):
+        items = []
+
+    # Get total count separately
+    count_params = {k: v for k, v in query_params.items() if k not in ("offset", "limit", "order", "select")}
+    count_params["select"] = "id"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r2 = await client.get(
+            f"{SUPABASE_URL}/rest/v1/review_queue",
+            headers={**supabase_headers, "Prefer": "count=exact", "Range": "0-0"},
+            params=count_params,
+        )
+    content_range = r2.headers.get("content-range", "")
     total = int(content_range.split("/")[-1]) if "/" in content_range else len(items)
 
     return {"items": items, "total": total, "page": page, "per_page": per_page}
