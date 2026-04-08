@@ -55,8 +55,9 @@ app.add_middleware(
         "https://www.complywithjudy.com",
         "https://complywithjudy.netlify.app",
     ],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+    allow_credentials=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -2152,28 +2153,48 @@ async def admin_upload_asset(item_id: str, request: Request):
     """Upload a screenshot or attachment for a review item."""
     admin_id = await verify_admin(request)
 
-    form = await request.form()
-    file = form.get("file")
-    if not file:
-        raise HTTPException(400, "No file provided")
+    # Try multipart form first, fall back to raw body
+    content = None
+    filename = "upload.jpg"
+    mime_type = "image/jpeg"
+    try:
+        form = await request.form()
+        file = form.get("file")
+        if file:
+            content = await file.read()
+            filename = getattr(file, "filename", "upload.jpg") or "upload.jpg"
+            mime_type = getattr(file, "content_type", "image/jpeg") or "image/jpeg"
+    except Exception:
+        pass
 
-    content = await file.read()
-    filename = getattr(file, "filename", "upload.jpg")
-    mime_type = getattr(file, "content_type", "image/jpeg")
-    storage_path = f"review-assets/{item_id}_{filename}"
+    if not content:
+        # Fallback: read raw body
+        content = await request.body()
+        ct = request.headers.get("content-type", "image/jpeg")
+        if "image/png" in ct:
+            mime_type = "image/png"
+            filename = "upload.png"
 
-    # Upload to Supabase Storage
-    async with httpx.AsyncClient(timeout=15) as client:
+    if not content or len(content) < 100:
+        raise HTTPException(400, "No file provided or file too small")
+
+    storage_filename = f"{item_id}_{filename}".replace(" ", "_")
+    storage_path = f"review-assets/{storage_filename}"
+
+    # Upload to Supabase Storage (use upsert to allow overwrite)
+    async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             f"{SUPABASE_URL}/storage/v1/object/{storage_path}",
             headers={
                 "apikey": SUPABASE_SERVICE_KEY,
                 "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 "Content-Type": mime_type,
+                "x-upsert": "true",
             },
             content=content,
         )
     if r.status_code >= 300:
+        log.warning(f"Storage upload failed: {r.status_code} {r.text[:300]}")
         raise HTTPException(500, f"Storage upload failed: {r.text[:200]}")
 
     # Create asset record
