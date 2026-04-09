@@ -280,7 +280,9 @@ async def _populate_review_queue(
     if screenshot_hex and items_to_insert:
         try:
             screenshot_bytes = bytes.fromhex(screenshot_hex)
-            storage_path = f"{scan_id}_page.jpg"
+            # Use scan_id if available, otherwise generate a unique name
+            file_id = scan_id if scan_id else str(uuid.uuid4())
+            storage_path = f"{file_id}_page.jpg"
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(
                     f"{SUPABASE_URL}/storage/v1/object/review-assets/{storage_path}",
@@ -288,18 +290,22 @@ async def _populate_review_queue(
                         "apikey": SUPABASE_SERVICE_KEY,
                         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                         "Content-Type": "image/jpeg",
+                        "x-upsert": "true",
                     },
                     content=screenshot_bytes,
                 )
                 if r.status_code < 300:
                     log.info(f"Screenshot uploaded: review-assets/{storage_path}")
-                    # Link screenshot to all queue items from this scan
-                    # Get the IDs of items just inserted
+                    # Link screenshot to all queue items for this site (pending ones just inserted)
                     async with httpx.AsyncClient(timeout=10) as client2:
                         r2 = await client2.get(
                             f"{SUPABASE_URL}/rest/v1/review_queue",
                             headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                            params={"scan_id": f"eq.{scan_id}", "select": "id"},
+                            params={
+                                "site_url": f"eq.{site_url}",
+                                "review_status": "eq.pending",
+                                "select": "id",
+                            },
                         )
                         if r2.status_code == 200:
                             queue_ids = [row["id"] for row in r2.json()]
@@ -321,6 +327,9 @@ async def _populate_review_queue(
                                     },
                                     json=asset_rows,
                                 )
+                                log.info(f"Linked screenshot to {len(asset_rows)} queue items for {site_url}")
+                else:
+                    log.warning(f"Screenshot upload failed: {r.status_code} {r.text[:200]}")
         except Exception as e:
             log.warning(f"Screenshot upload failed: {e}")
 
@@ -2132,6 +2141,35 @@ async def admin_get_queue_item(item_id: str, request: Request):
                     except:
                         pass
                 scan_context = result
+
+    # Fallback: if no scan_context (scan_id missing), build context from all queue items for this site
+    if not scan_context and item.get("site_url"):
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/review_queue",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                params={"site_url": f"eq.{item['site_url']}", "select": "*", "order": "rule_id"},
+            )
+            if r.status_code == 200:
+                siblings = r.json()
+                # Build a synthetic scan_context that the frontend can use
+                scan_context = {
+                    "score": item.get("score"),
+                    "url": item.get("site_url"),
+                    "url_final": item.get("page_url"),
+                    "profession": item.get("profession"),
+                    "entity_type": item.get("entity_type"),
+                    "checks": [
+                        {
+                            "id": s["rule_id"],
+                            "name": s["rule_name"],
+                            "status": s["scanner_status"],
+                            "detail": s.get("scanner_detail", ""),
+                            "description": s.get("scanner_detail", ""),
+                        }
+                        for s in siblings
+                    ],
+                }
 
     return {"item": item, "assets": assets, "scan_context": scan_context}
 
