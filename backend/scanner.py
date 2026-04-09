@@ -923,7 +923,7 @@ async def lookup_dre_info(license_number: str) -> dict:
 
         # Extract Responsible Broker (for salesperson licenses)
         rb_match = re.search(
-            r'Responsible\s+Broker.*?License\s+ID:\s*<A[^>]*>(\d{7,9})</A>(.*?)(?:Former\s+Responsible|Comment|Public\s+information)',
+            r'Responsible\s+Broker.*?License\s+ID:\s*<[aA][^>]*>\s*(\d{7,9})\s*</[aA]>(.*?)(?:Former\s+Responsible|Comment|Public\s+information)',
             html_resp, re.I | re.DOTALL)
         if rb_match:
             info["responsible_broker_lic"] = rb_match.group(1).strip()
