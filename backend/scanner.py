@@ -678,6 +678,9 @@ async def scrape_website(url: str) -> dict:
             }""")
             log.info(f"EHO DOM signals for {url}: {eho_signals}")
 
+            # Save the homepage URL before navigating away
+            homepage_url = page.url
+
             # --- Follow privacy policy link for CCPA verification ---
             privacy_page_text = ""
             try:
@@ -705,7 +708,7 @@ async def scrape_website(url: str) -> dict:
                 "raw_html": raw_html[:200000],  # cap at 200k chars
                 "screenshot_hex": screenshot_b64,
                 "internal_link_count": links,
-                "url_final": page.url,
+                "url_final": homepage_url,
                 "eho_signals": eho_signals,
                 "privacy_page_text": privacy_page_text,
             }
