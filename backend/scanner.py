@@ -2066,6 +2066,48 @@ async def admin_decide_queue_item(item_id: str, body: ReviewDecision, request: R
         )
     if r.status_code >= 300:
         raise HTTPException(r.status_code, f"Failed to update: {r.text[:200]}")
+
+    # Auto-close sibling items when marking a site as not_applicable + entity_misclass
+    # or any site-wide decision (not_applicable, needs_rescan with entity tag)
+    if body.decision == "not_applicable" and body.bug_tag in ("entity_misclass", "parked_domain"):
+        # Get the site_url for this item
+        async with httpx.AsyncClient(timeout=10) as client:
+            r2 = await client.get(
+                f"{SUPABASE_URL}/rest/v1/review_queue",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                params={"id": f"eq.{item_id}", "select": "site_url"},
+            )
+        items = r2.json() if r2.status_code < 300 else []
+        if items:
+            site_url = items[0]["site_url"]
+            # Close all other pending/claimed items for the same site
+            sibling_payload = {
+                "decision": body.decision,
+                "reviewer_id": admin_id if admin_id != "api_key_admin" else None,
+                "reviewer_note": f"Auto-closed: site marked as {body.bug_tag}",
+                "bug_tag": body.bug_tag,
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "review_status": "completed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                r3 = await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/review_queue",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    params={
+                        "site_url": f"eq.{site_url}",
+                        "id": f"neq.{item_id}",
+                        "review_status": "in.(pending,claimed)",
+                    },
+                    json=sibling_payload,
+                )
+            log.info(f"Auto-closed sibling items for {site_url} ({body.bug_tag})")
+
     return {"ok": True}
 
 
