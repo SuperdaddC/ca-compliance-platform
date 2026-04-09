@@ -250,7 +250,27 @@ async def _populate_review_queue(
                 json=items_to_insert,
             )
             if r.status_code >= 300:
-                log.warning(f"Review queue insert failed: {r.status_code} {r.text[:200]}")
+                # FK constraint on scan_id? Retry without scan_id
+                if "scan_id" in r.text and ("23503" in r.text or "foreign key" in r.text.lower()):
+                    log.warning(f"Review queue FK error on scan_id — retrying without scan_id")
+                    for item in items_to_insert:
+                        item["scan_id"] = None
+                    r2 = await client.post(
+                        f"{SUPABASE_URL}/rest/v1/review_queue",
+                        headers={
+                            "apikey": SUPABASE_SERVICE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                            "Content-Type": "application/json",
+                            "Prefer": "resolution=ignore-duplicates",
+                        },
+                        json=items_to_insert,
+                    )
+                    if r2.status_code >= 300:
+                        log.warning(f"Review queue insert failed (retry): {r2.status_code} {r2.text[:200]}")
+                    else:
+                        log.info(f"Review queue: inserted {len(items_to_insert)} items for {site_url} (no scan_id)")
+                else:
+                    log.warning(f"Review queue insert failed: {r.status_code} {r.text[:200]}")
             else:
                 log.info(f"Review queue: inserted {len(items_to_insert)} items for {site_url}")
     except Exception as e:
@@ -415,7 +435,7 @@ async def create_scan_record(scan_id: str, url: str, profession: str, email: str
 
     try:
         async with httpx.AsyncClient() as client:
-            await client.post(
+            r = await client.post(
                 f"{SUPABASE_URL}/rest/v1/scans",
                 headers={
                     "apikey": SUPABASE_SERVICE_KEY,
@@ -425,7 +445,10 @@ async def create_scan_record(scan_id: str, url: str, profession: str, email: str
                 },
                 json=payload
             )
-        log.info(f"Created scan record {scan_id}")
+            if r.status_code >= 300:
+                log.warning(f"Failed to create scan record {scan_id}: {r.status_code} {r.text[:200]}")
+            else:
+                log.info(f"Created scan record {scan_id}")
     except Exception as e:
         log.warning(f"Failed to create scan record: {e}")
 
