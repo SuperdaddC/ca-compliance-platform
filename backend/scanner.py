@@ -200,6 +200,7 @@ async def _populate_review_queue(
     score: int,
     rule_results: list,
     screenshot_hex: str = "",
+    platform: str = "unknown",
 ):
     """
     Auto-populate review_queue with ambiguous scanner results.
@@ -703,6 +704,10 @@ async def scrape_website(url: str) -> dict:
             except Exception as e:
                 log.warning(f"Failed to load privacy page: {e}")
 
+            # --- Platform / web developer detection ---
+            platform = _detect_platform(raw_html, head_html, homepage_url)
+            log.info(f"Platform detected for {homepage_url}: {platform}")
+
             return {
                 "text": combined,
                 "raw_html": raw_html[:200000],  # cap at 200k chars
@@ -711,6 +716,7 @@ async def scrape_website(url: str) -> dict:
                 "url_final": homepage_url,
                 "eho_signals": eho_signals,
                 "privacy_page_text": privacy_page_text,
+                "platform": platform,
             }
 
         finally:
@@ -875,6 +881,82 @@ async def lookup_dre_info(license_number: str) -> dict:
 
     _DRE_INFO_CACHE[lic] = info
     return info
+
+
+# ---------------------------------------------------------------------------
+# Platform / web developer detection
+# ---------------------------------------------------------------------------
+_PLATFORM_SIGNATURES = [
+    # CMS / Builders
+    ("wordpress", [r'/wp-content/', r'/wp-includes/', r'wp-json', r'<meta name="generator" content="WordPress']),
+    ("wix", [r'wixstatic\.com', r'static\.parastorage\.com', r'X-Wix-', r'wix-warmup-data']),
+    ("squarespace", [r'squarespace-cdn\.com', r'squarespace\.com/static', r'"siteId".*"squarespace"']),
+    ("webflow", [r'assets\.website-files\.com', r'webflow\.com', r'data-wf-site']),
+    ("godaddy_builder", [r'godaddy\.com/website-builder', r'img1\.wsimg\.com', r'secureservercdn\.net']),
+    ("weebly", [r'weebly\.com', r'editmysite\.com']),
+    ("shopify", [r'cdn\.shopify\.com', r'shopify\.com/s/']),
+
+    # RE-specific platforms
+    ("luxury_presence", [r'luxurypresence\.com', r'lp-cdn\.com', r'class="lp-']),
+    ("sierra_interactive", [r'sierra\.com', r'sierrainteractive', r'idx\.sierra']),
+    ("placester", [r'placester\.com', r'placester-cdn']),
+    ("boomtown", [r'boomtownroi\.com', r'boomtown\.com']),
+    ("chime", [r'chime\.me', r'chimecdn\.com']),
+    ("kvcore", [r'kvcore\.com', r'kvcoreidx', r'insiderealestate\.com']),
+    ("lofty", [r'lofty\.com', r'ylopo\.com', r'class="lofty-']),
+    ("idx_broker", [r'idxbroker\.com', r'idx-broker', r'idxpress']),
+    ("real_geeks", [r'realgeeks\.com', r'rg-cdn']),
+    ("agent_fire", [r'agentfire\.com', r'flavor="developer_flavor"']),
+    ("easy_agent_pro", [r'easyagentpro\.com', r'jeap-']),
+    ("z57", [r'z57\.com', r'propertypulse']),
+
+    # Lending platforms
+    ("lenderhomepage", [r'lenderhomepage\.com', r'class="lhp-']),
+    ("mortgage_iq", [r'mortgageiq\.com', r'mymortgage-online\.com']),
+    ("homebot", [r'homebot\.ai']),
+    ("total_expert", [r'totalexpert\.com', r'totalexpert\.net']),
+
+    # Franchise / brokerage platforms
+    ("kw_command", [r'\.kw\.com', r'kw\.com/', r'kellerwilliams']),
+    ("compass_platform", [r'compass\.com/agents', r'compass\.com/homes']),
+    ("exp_realty", [r'exprealty\.com', r'\.exp\.com']),
+    ("c21_platform", [r'\.c21\.', r'century21\.com', r'sites\.c21\.homes']),
+    ("coldwell_banker", [r'coldwellbanker\.com', r'\.cbhome\.com']),
+    ("bhhs", [r'bhhs\.com', r'berkshirehathaway']),
+    ("sothebys", [r'sothebysrealty\.com', r'sir\.com']),
+    ("remax", [r'remax\.com', r'\.remax\.']),
+    ("redfin", [r'redfin\.com']),
+    ("realogy", [r'realogy\.com', r'anywhere\.re']),
+    ("side_platform", [r'side\.com', r'sideinc\.com']),
+    ("real_brokerage", [r'onereal\.com', r'joinreal\.com']),
+
+    # Generic
+    ("elementor", [r'elementor', r'class="elementor-']),
+    ("divi", [r'class="et_pb_', r'et-boc', r'Divi']),
+]
+
+
+def _detect_platform(html: str, head_html: str, url: str) -> str:
+    """Detect the website platform/builder from HTML signatures."""
+    combined = (html[:100000] + " " + head_html + " " + url).lower()
+    matches = []
+    for platform_name, patterns in _PLATFORM_SIGNATURES:
+        for pattern in patterns:
+            if re.search(pattern, combined, re.I):
+                matches.append(platform_name)
+                break
+    if not matches:
+        return "unknown"
+    # If multiple match (e.g., wordpress + elementor), join them
+    # Prefer the more specific match (RE platform > generic CMS)
+    if len(matches) == 1:
+        return matches[0]
+    # Filter out generic if specific exists
+    generic = {"wordpress", "elementor", "divi", "shopify"}
+    specific = [m for m in matches if m not in generic]
+    if specific:
+        return specific[0]
+    return matches[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1788,6 +1870,7 @@ async def scan(req: ScanRequest, request: Request):
             "url": scraped["url_final"],
             "profession": req.profession,
             "entity_type": entity_type,
+            "platform": scraped.get("platform", "unknown"),
             "status": "completed",
             "is_free_scan": (reason == "free"),
             "elapsed_seconds": elapsed,
@@ -2512,6 +2595,7 @@ async def api_scan(req: ApiScanRequest, request: Request):
             "url": final_url,
             "profession": req.profession,
             "entity_type": entity_type,
+            "platform": scraped.get("platform", "unknown"),
             "status": "completed",
             "is_free_scan": False,
             "elapsed_seconds": elapsed,
