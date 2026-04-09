@@ -32,6 +32,8 @@ export default function ReviewItem() {
   const [bugTag, setBugTag] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [showBrokerInfo, setShowBrokerInfo] = useState(false)
+  const [brokerInfo, setBrokerInfo] = useState<{ name: string; dre: string; phone: string; email: string; brokerage: string }>({ name: '', dre: '', phone: '', email: '', brokerage: '' })
   // All queue items for the same site (for intra-site navigation)
   const [siteItems, setSiteItems] = useState<ReviewItemType[]>([])
   // Neighboring sites in the global queue (for inter-site navigation)
@@ -44,6 +46,8 @@ export default function ReviewItem() {
     setNote('')
     setBugTag('')
     setError('')
+    setShowBrokerInfo(false)
+    setBrokerInfo({ name: '', dre: '', phone: '', email: '', brokerage: '' })
     try {
       const result = await getQueueItem(itemId)
       setData(result)
@@ -131,7 +135,8 @@ export default function ReviewItem() {
     setSubmitting(true)
     setError('')
     try {
-      await submitDecision(itemId, selectedDecision, note, bugTag)
+      const hasBroker = Object.values(brokerInfo).some(v => v)
+      await submitDecision(itemId, selectedDecision, note, bugTag, hasBroker ? brokerInfo : undefined)
       // Advance: next unreviewed rule on same site → next site → back to queue
       const nextOnSite = getNextUnreviewedOnSite()
       if (nextOnSite) {
@@ -400,6 +405,58 @@ export default function ReviewItem() {
           </div>
         )}
       </div>
+
+      {/* Broker Info capture — show for responsible_broker fails on associates */}
+      {item.rule_id === 'responsible_broker' && (
+        <div className="max-w-7xl mx-auto px-4 mb-4">
+          <button
+            onClick={() => setShowBrokerInfo(!showBrokerInfo)}
+            className="text-sm text-purple-600 hover:text-purple-800 font-medium"
+          >
+            {showBrokerInfo ? '- Hide' : '+'} Broker Contact Info (for marketing)
+          </button>
+          {showBrokerInfo && (
+            <div className="mt-2 bg-purple-50 border border-purple-200 rounded-lg p-4 grid grid-cols-2 gap-3">
+              <input
+                type="text"
+                placeholder="Broker Name"
+                value={brokerInfo.name}
+                onChange={e => setBrokerInfo({ ...brokerInfo, name: e.target.value })}
+                className="border rounded px-3 py-1.5 text-sm"
+              />
+              <input
+                type="text"
+                placeholder="DRE #"
+                value={brokerInfo.dre}
+                onChange={e => setBrokerInfo({ ...brokerInfo, dre: e.target.value })}
+                className="border rounded px-3 py-1.5 text-sm"
+              />
+              <input
+                type="text"
+                placeholder="Brokerage Name"
+                value={brokerInfo.brokerage}
+                onChange={e => setBrokerInfo({ ...brokerInfo, brokerage: e.target.value })}
+                className="border rounded px-3 py-1.5 text-sm"
+              />
+              <input
+                type="text"
+                placeholder="Phone"
+                value={brokerInfo.phone}
+                onChange={e => setBrokerInfo({ ...brokerInfo, phone: e.target.value })}
+                className="border rounded px-3 py-1.5 text-sm"
+              />
+              <input
+                type="text"
+                placeholder="Email"
+                value={brokerInfo.email}
+                onChange={e => setBrokerInfo({ ...brokerInfo, email: e.target.value })}
+                className="border rounded px-3 py-1.5 text-sm col-span-2"
+              />
+              <p className="col-span-2 text-xs text-purple-500">This broker's agents are failing compliance — capture their info for Judy outreach.</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Sticky decision bar */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg px-4 py-3 z-50">

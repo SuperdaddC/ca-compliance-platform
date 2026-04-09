@@ -34,6 +34,7 @@ export interface ReviewItem {
   reviewer_id: string | null
   reviewer_note: string | null
   bug_tag: string | null
+  broker_info: { name?: string; dre?: string; phone?: string; email?: string; brokerage?: string } | null
   source: string
   created_at: string
   reviewed_at: string | null
@@ -117,12 +118,16 @@ export async function getQueueItem(id: string): Promise<QueueDetailResponse> {
   return r.json()
 }
 
-export async function submitDecision(id: string, decision: string, note?: string, bugTag?: string) {
+export async function submitDecision(id: string, decision: string, note?: string, bugTag?: string, brokerInfo?: { name?: string; dre?: string; phone?: string; email?: string; brokerage?: string }) {
   const headers = await getAuthHeaders()
+  const payload: any = { decision, reviewer_note: note || null, bug_tag: bugTag || null }
+  if (brokerInfo && Object.values(brokerInfo).some(v => v)) {
+    payload.broker_info = brokerInfo
+  }
   const r = await fetch(`${SCANNER_URL}/admin/queue/${id}`, {
     method: 'PATCH',
     headers,
-    body: JSON.stringify({ decision, reviewer_note: note || null, bug_tag: bugTag || null }),
+    body: JSON.stringify(payload),
   })
   if (!r.ok) throw new Error(`Decision failed: ${r.status}`)
   return r.json()
@@ -197,6 +202,7 @@ export const BUG_TAGS = [
   { key: 'dre_lookup_error', label: 'DRE Lookup Error', tooltip: 'The DRE public lookup returned wrong info, timed out, or misidentified the license type.' },
   { key: 'ccpa_on_subpage', label: 'CCPA on Subpage', tooltip: 'Privacy policy has CCPA content but scanner didn\'t find it because the privacy page link wasn\'t followed or rendered.' },
   { key: 'false_trigger', label: 'False TILA Trigger', tooltip: 'Scanner flagged TILA/Reg Z but the "triggering terms" are generic marketing language, not actual rate/payment ads.' },
+  { key: 'rule_not_applicable', label: 'Rule N/A', tooltip: 'Rule doesn\'t apply to this page (e.g., AB 723 flagged but no property images exist, or DRE check on DFPI-only lender).' },
   { key: 'other', label: 'Other', tooltip: 'Doesn\'t fit any predefined category. Add details in the note field.' },
 ] as const
 

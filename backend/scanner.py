@@ -2179,6 +2179,7 @@ class ReviewDecision(BaseModel):
     reviewer_note: Optional[str] = None
     bug_tag: Optional[str] = None
     review_status: Optional[str] = None
+    broker_info: Optional[dict] = None
 
 
 @app.patch("/admin/queue/{item_id}")
@@ -2198,6 +2199,8 @@ async def admin_decide_queue_item(item_id: str, body: ReviewDecision, request: R
         payload["bug_tag"] = body.bug_tag
     if body.review_status:
         payload["review_status"] = body.review_status
+    if body.broker_info:
+        payload["broker_info"] = body.broker_info
 
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.patch(
