@@ -135,7 +135,7 @@ ADMIN_EMAILS = {"mike@thecolyerteam.com", "mjcolyer@gmail.com"}
 REVIEW_QUEUE_RULES = {
     "responsible_broker",      # R02 — ambiguous broker disclosure
     "safe_nmls",               # R03 — NMLS format edge cases
-    "ab723_images",            # R05 — altered image disclosure
+    # "ab723_images",          # R05 — removed: scanner can't verify if images are altered, just warns
     "physical_address",        # R10 — address regex false positives
     "equal_housing_lender",    # R15 — EHO vs EHL, image-only logos
     "dfpi_prohibited",         # R16 — borderline advertising claims
