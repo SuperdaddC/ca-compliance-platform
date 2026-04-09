@@ -927,16 +927,19 @@ async def lookup_dre_info(license_number: str) -> dict:
             html_resp, re.I | re.DOTALL)
         if rb_match:
             info["responsible_broker_lic"] = rb_match.group(1).strip()
-            # Extract broker name — first non-empty line after the license link
+            # Extract broker name and address from the block after the license link
             rb_block = rb_match.group(2)
-            # Clean HTML tags and extract text lines
+            # Strip HTML tags, then clean up
             rb_text = re.sub(r'<[^>]+>', '\n', rb_block)
-            rb_lines = [l.strip() for l in rb_text.strip().split('\n') if l.strip()]
+            # Filter to only real text lines (skip empty, skip anything that looks like HTML artifacts)
+            rb_lines = [l.strip() for l in rb_text.strip().split('\n')
+                        if l.strip() and not l.strip().startswith(('<', '&', 'http'))]
             if rb_lines:
                 info["responsible_broker"] = rb_lines[0]  # e.g., "LPT Realty, Inc"
-                # Remaining lines are the address
-                if len(rb_lines) > 1:
-                    info["responsible_broker_address"] = ', '.join(rb_lines[1:])
+                # Remaining lines are the address (typically 2 lines: street + city/state/zip)
+                addr_lines = rb_lines[1:3]  # Max 2 address lines
+                if addr_lines:
+                    info["responsible_broker_address"] = ', '.join(addr_lines)
 
     except Exception as e:
         log.warning(f"DRE lookup failed for {lic}: {e}")
