@@ -33,7 +33,7 @@ export default function ReviewItem() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [showBrokerInfo, setShowBrokerInfo] = useState(false)
-  const [brokerInfo, setBrokerInfo] = useState<{ name: string; dre: string; phone: string; email: string; brokerage: string }>({ name: '', dre: '', phone: '', email: '', brokerage: '' })
+  const [brokerInfoText, setBrokerInfoText] = useState('')
   // All queue items for the same site (for intra-site navigation)
   const [siteItems, setSiteItems] = useState<ReviewItemType[]>([])
   // Neighboring sites in the global queue (for inter-site navigation)
@@ -47,7 +47,7 @@ export default function ReviewItem() {
     setBugTag('')
     setError('')
     setShowBrokerInfo(false)
-    setBrokerInfo({ name: '', dre: '', phone: '', email: '', brokerage: '' })
+    setBrokerInfoText('')
     try {
       const result = await getQueueItem(itemId)
       setData(result)
@@ -135,8 +135,8 @@ export default function ReviewItem() {
     setSubmitting(true)
     setError('')
     try {
-      const hasBroker = Object.values(brokerInfo).some(v => v)
-      await submitDecision(itemId, selectedDecision, note, bugTag, hasBroker ? brokerInfo : undefined)
+      const brokerPayload = brokerInfoText.trim() ? { raw: brokerInfoText.trim() } : undefined
+      await submitDecision(itemId, selectedDecision, note, bugTag, brokerPayload)
       // Advance: next unreviewed rule on same site → next site → back to queue
       const nextOnSite = getNextUnreviewedOnSite()
       if (nextOnSite) {
@@ -406,53 +406,35 @@ export default function ReviewItem() {
         )}
       </div>
 
-      {/* Broker Info capture — show for responsible_broker fails on associates */}
+      {/* Broker Info capture — show for responsible_broker items */}
       {item.rule_id === 'responsible_broker' && (
         <div className="max-w-7xl mx-auto px-4 mb-4">
+          {item.broker_info && (
+            <div className="bg-purple-50 border border-purple-200 rounded-lg px-4 py-3 mb-2 text-sm">
+              <strong className="text-purple-700">Broker from DRE:</strong>{' '}
+              <span className="text-gray-700">
+                {item.broker_info.name || item.broker_info.brokerage}
+                {item.broker_info.dre && ` — DRE #${item.broker_info.dre}`}
+                {item.broker_info.address && ` — ${item.broker_info.address}`}
+              </span>
+            </div>
+          )}
           <button
             onClick={() => setShowBrokerInfo(!showBrokerInfo)}
             className="text-sm text-purple-600 hover:text-purple-800 font-medium"
           >
-            {showBrokerInfo ? '- Hide' : '+'} Broker Contact Info (for marketing)
+            {showBrokerInfo ? '- Hide' : '+'} Paste broker info (for marketing)
           </button>
           {showBrokerInfo && (
-            <div className="mt-2 bg-purple-50 border border-purple-200 rounded-lg p-4 grid grid-cols-2 gap-3">
-              <input
-                type="text"
-                placeholder="Broker Name"
-                value={brokerInfo.name}
-                onChange={e => setBrokerInfo({ ...brokerInfo, name: e.target.value })}
-                className="border rounded px-3 py-1.5 text-sm"
+            <div className="mt-2">
+              <textarea
+                value={brokerInfoText}
+                onChange={e => setBrokerInfoText(e.target.value)}
+                placeholder={"Paste from DRE lookup, e.g.:\nResponsible Broker:\nLicense ID: 02248983\nLPT Realty, Inc\n10620 TREENA ST STE 230\nSAN DIEGO, CA 92131"}
+                rows={5}
+                className="w-full border border-purple-200 rounded-lg px-3 py-2 text-sm font-mono bg-purple-50"
               />
-              <input
-                type="text"
-                placeholder="DRE #"
-                value={brokerInfo.dre}
-                onChange={e => setBrokerInfo({ ...brokerInfo, dre: e.target.value })}
-                className="border rounded px-3 py-1.5 text-sm"
-              />
-              <input
-                type="text"
-                placeholder="Brokerage Name"
-                value={brokerInfo.brokerage}
-                onChange={e => setBrokerInfo({ ...brokerInfo, brokerage: e.target.value })}
-                className="border rounded px-3 py-1.5 text-sm"
-              />
-              <input
-                type="text"
-                placeholder="Phone"
-                value={brokerInfo.phone}
-                onChange={e => setBrokerInfo({ ...brokerInfo, phone: e.target.value })}
-                className="border rounded px-3 py-1.5 text-sm"
-              />
-              <input
-                type="text"
-                placeholder="Email"
-                value={brokerInfo.email}
-                onChange={e => setBrokerInfo({ ...brokerInfo, email: e.target.value })}
-                className="border rounded px-3 py-1.5 text-sm col-span-2"
-              />
-              <p className="col-span-2 text-xs text-purple-500">This broker's agents are failing compliance — capture their info for Judy outreach.</p>
+              <p className="mt-1 text-xs text-purple-500">Paste the responsible broker block from DRE lookup. Saved as-is for outreach pipeline.</p>
             </div>
           )}
         </div>

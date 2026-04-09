@@ -34,7 +34,7 @@ export interface ReviewItem {
   reviewer_id: string | null
   reviewer_note: string | null
   bug_tag: string | null
-  broker_info: { name?: string; dre?: string; phone?: string; email?: string; brokerage?: string } | null
+  broker_info: Record<string, string> | null
   source: string
   created_at: string
   reviewed_at: string | null
@@ -118,7 +118,7 @@ export async function getQueueItem(id: string): Promise<QueueDetailResponse> {
   return r.json()
 }
 
-export async function submitDecision(id: string, decision: string, note?: string, bugTag?: string, brokerInfo?: { name?: string; dre?: string; phone?: string; email?: string; brokerage?: string }) {
+export async function submitDecision(id: string, decision: string, note?: string, bugTag?: string, brokerInfo?: Record<string, string>) {
   const headers = await getAuthHeaders()
   const payload: any = { decision, reviewer_note: note || null, bug_tag: bugTag || null }
   if (brokerInfo && Object.values(brokerInfo).some(v => v)) {

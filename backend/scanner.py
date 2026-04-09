@@ -201,6 +201,7 @@ async def _populate_review_queue(
     rule_results: list,
     screenshot_hex: str = "",
     platform: str = "unknown",
+    dre_info: dict = None,
 ):
     """
     Auto-populate review_queue with ambiguous scanner results.
@@ -215,7 +216,7 @@ async def _populate_review_queue(
             continue
         if r.status not in ("fail", "warn"):
             continue
-        items_to_insert.append({
+        item = {
             "scan_id": scan_id,
             "site_url": site_url,
             "page_url": page_url,
@@ -231,7 +232,17 @@ async def _populate_review_queue(
             "rule_version": SCANNER_VERSION,
             "review_status": "pending",
             "source": "auto",
-        })
+        }
+        # Auto-populate broker_info from DRE lookup for responsible_broker items
+        if r.id == "responsible_broker" and dre_info and dre_info.get("responsible_broker_lic"):
+            item["broker_info"] = {
+                "name": dre_info.get("responsible_broker"),
+                "dre": dre_info.get("responsible_broker_lic"),
+                "brokerage": dre_info.get("responsible_broker"),
+                "address": dre_info.get("responsible_broker_address"),
+                "source": "dre_lookup",
+            }
+        items_to_insert.append(item)
 
     if not items_to_insert:
         return
@@ -865,6 +876,8 @@ async def lookup_dre_info(license_number: str) -> dict:
 
     info = {"name": None, "license_type": None, "status": None,
             "designated_officer": None, "designated_officer_lic": None,
+            "responsible_broker": None, "responsible_broker_lic": None,
+            "responsible_broker_address": None,
             "main_office": None, "dba": None}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -907,6 +920,23 @@ async def lookup_dre_info(license_number: str) -> dict:
             parts = info["designated_officer"].split(",", 1)
             if len(parts) == 2:
                 info["designated_officer"] = f"{parts[1].strip()} {parts[0].strip()}"
+
+        # Extract Responsible Broker (for salesperson licenses)
+        rb_match = re.search(
+            r'Responsible\s+Broker.*?License\s+ID:\s*<A[^>]*>(\d{7,9})</A>(.*?)(?:Former\s+Responsible|Comment|Public\s+information)',
+            html_resp, re.I | re.DOTALL)
+        if rb_match:
+            info["responsible_broker_lic"] = rb_match.group(1).strip()
+            # Extract broker name — first non-empty line after the license link
+            rb_block = rb_match.group(2)
+            # Clean HTML tags and extract text lines
+            rb_text = re.sub(r'<[^>]+>', '\n', rb_block)
+            rb_lines = [l.strip() for l in rb_text.strip().split('\n') if l.strip()]
+            if rb_lines:
+                info["responsible_broker"] = rb_lines[0]  # e.g., "LPT Realty, Inc"
+                # Remaining lines are the address
+                if len(rb_lines) > 1:
+                    info["responsible_broker_address"] = ', '.join(rb_lines[1:])
 
     except Exception as e:
         log.warning(f"DRE lookup failed for {lic}: {e}")
@@ -1210,12 +1240,20 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
             regulation="California Business & Professions Code §10140.6(b)(1) — The DRE license number identifies the responsible broker. For broker-owned sites, displaying the DRE number satisfies the broker disclosure requirement."))
     elif dre_number and dre_info and dre_info.get("name"):
         # DRE number found but it's a salesperson license — need broker info
+        rb_name = dre_info.get("responsible_broker") or "Unknown"
+        rb_lic = dre_info.get("responsible_broker_lic") or ""
+        rb_addr = dre_info.get("responsible_broker_address") or ""
+        rb_detail = f"Salesperson websites must identify the responsible/supervising broker by name and DRE license number."
+        if rb_lic:
+            rb_detail += f"\n\nDRE records show responsible broker: {rb_name}, DRE #{rb_lic}"
+            if rb_addr:
+                rb_detail += f", {rb_addr}"
         results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "warn",
             f"DRE #{dre_number} is a salesperson license ({dre_info['name']}). Supervising broker not identified on page.",
-            detail="Salesperson websites must identify the responsible/supervising broker by name and DRE license number.",
+            detail=rb_detail,
             source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
             regulation="Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
-            fix=f"Add your supervising broker's name and DRE number to your footer, e.g.: '[Broker Name], DRE #[Broker Number]'."))
+            fix=f"Add your supervising broker's name and DRE number to your footer: '{rb_name}, DRE #{rb_lic}'." if rb_lic else "Add your supervising broker's name and DRE number to your footer."))
     else:
         results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "fail",
             "No responsible or supervising broker identified on this page.",
@@ -1936,6 +1974,7 @@ async def scan(req: ScanRequest, request: Request):
                 score=score,
                 rule_results=rule_results,
                 screenshot_hex=scraped.get("screenshot_hex", ""),
+                dre_info=dre_info,
             )
         except Exception as e:
             log.warning(f"Review queue population failed (non-blocking): {e}")
@@ -2692,6 +2731,7 @@ async def api_scan(req: ApiScanRequest, request: Request):
                 score=score,
                 rule_results=rule_results,
                 screenshot_hex=scraped.get("screenshot_hex", ""),
+                dre_info=dre_info,
             )
         except Exception as e:
             log.warning(f"[api_scan] Review queue population failed (non-blocking): {e}")
