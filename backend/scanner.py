@@ -1027,24 +1027,80 @@ def _detect_platform(html: str, head_html: str, url: str) -> str:
 # ---------------------------------------------------------------------------
 # Entity classification — detect non-brokerage entities to skip inapplicable checks
 # ---------------------------------------------------------------------------
-def classify_entity(text: str) -> str:
+def classify_entity(text: str, dre_info: dict = None) -> str:
     """
     Classify the website entity type from page content.
     Returns one of: 'nonprofit', 'commercial_developer', 'property_manager',
-    'commercial_lender', or 'standard' (apply normal checks).
+    'commercial_lender', 'dfpi_lender', 'national_bank', 'recruiting_site',
+    'blog_or_parked', or 'standard' (apply normal checks).
     """
     lower = text.lower()
 
-    # Nonprofit signals — require STRONG self-identification, not just mentioning "nonprofit"
-    # Must describe THEMSELVES as nonprofit (not "loans for nonprofits" or "nonprofit clients")
+    # --- DFPI/CFL lender detection ---
+    # These are mortgage companies licensed under CA Finance Lenders Law (DFPI),
+    # NOT under DRE. DRE-specific rules (dre_license, responsible_broker) don't apply.
+    # Key signals: DFPI/CFL license references, "licensed by the Department of Financial
+    # Protection and Innovation", California Finance Lender license number, mortgage banker
+    dfpi_signals = re.search(
+        r'(?:licensed|regulated)\s+(?:by|under)\s+(?:the\s+)?(?:california\s+)?dep(?:artment|\.)?\s+of\s+financial'
+        r'|department\s+of\s+financial\s+protection'
+        r'|\bdfpi\b'
+        r'|\bcfl\s*(?:#|number|license|lic)'
+        r'|california\s+finance\s+lender'
+        r'|finance\s+lenders?\s+law'
+        r'|california\s+residential\s+mortgage\s+lending\s+act'
+        r'|\bcrmla\b'
+        r'|licensed\s+(?:by|under)\s+(?:the\s+)?(?:ca\s+)?(?:dept|department)\s+of\s+(?:business\s+oversight|corporations)'
+        r'|mortgage\s+bank(?:er|ing)\s+licens'
+        , lower)
+    if dfpi_signals:
+        # Confirm it's a lender, not a DRE broker who also mentions DFPI
+        has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}', lower))
+        # If they have BOTH DRE and DFPI, they're dual-licensed — keep as standard
+        if not has_dre_license:
+            return 'dfpi_lender'
+
+    # Also detect via DRE lookup: if we looked up a license and found nothing,
+    # but the site has NMLS, it's likely DFPI
+    if dre_info is None and re.search(r'\bnmls\s*#?\s*\d{4,10}', lower):
+        # Has NMLS but no DRE number found — check for lending language
+        if re.search(r'mortgage|home\s+loan|refinanc|lending|lender', lower):
+            if not re.search(r'\bdre\s*#?\s*\d{7,9}', lower):
+                return 'dfpi_lender'
+
+    # --- National bank / credit union ---
+    # Federal institutions regulated by OCC/NCUA/FDIC, not DRE
+    if re.search(
+        r'\bnational\s+bank\b'
+        r'|member\s+fdic'
+        r'|\bfdic\s+insured\b'
+        r'|national\s+association\b.*\bmortgage'
+        r'|\bcredit\s+union\b'
+        r'|\bncua\b'
+        r'|federally?\s+(?:chartered|insured)\s+(?:bank|credit\s+union)'
+        r'|\b(?:us|u\.s\.)\s+bank\b'
+        r'|\bwells\s+fargo\b|\bchase\b|\bbank\s+of\s+america\b'
+        , lower):
+        return 'national_bank'
+
+    # --- Recruiting / office site (not consumer-facing) ---
+    if re.search(r'join\s+(?:our|the)\s+(?:team|brokerage|office)|careers?\s+(?:at|with|in)\s+real\s+estate|recruiting|become\s+an?\s+agent|agent\s+attraction', lower):
+        if not re.search(r'(?:buy|sell|purchase|listing|home\s+search|property\s+search|mls)', lower):
+            return 'recruiting_site'
+
+    # --- Blog / informational (no active business) ---
+    if re.search(r'this\s+domain\s+(?:is|may\s+be)\s+for\s+sale|parked\s+(?:domain|page|by)|under\s+construction|coming\s+soon|site\s+not\s+available', lower):
+        return 'blog_or_parked'
+
+    # Nonprofit signals — require STRONG self-identification
     nonprofit_strong = re.search(
-        r'501\s*\(\s*c\s*\)\s*\(?\s*3'           # explicit 501(c)(3)
-        r'|we\s+are\s+a\s+non[\-\s]?profit'       # "we are a nonprofit"
-        r'|\bis\s+a\s+non[\-\s]?profit'            # "[org] is a nonprofit"
-        r'|\bour\s+non[\-\s]?profit'               # "our nonprofit"
-        r'|\btax[\-\s]deductible\s+donation'        # tax-deductible donations (not just "tax deductible")
-        r'|\bdonate\s+(?:now|today|here)\b'         # active donation solicitation
-        r'|\bcommunity\s+development\s+financial\s+institution\b'  # explicit CDFI
+        r'501\s*\(\s*c\s*\)\s*\(?\s*3'
+        r'|we\s+are\s+a\s+non[\-\s]?profit'
+        r'|\bis\s+a\s+non[\-\s]?profit'
+        r'|\bour\s+non[\-\s]?profit'
+        r'|\btax[\-\s]deductible\s+donation'
+        r'|\bdonate\s+(?:now|today|here)\b'
+        r'|\bcommunity\s+development\s+financial\s+institution\b'
         , lower)
     if nonprofit_strong:
         if not re.search(r'\bdre\b.*#?\s*\d{7,9}|nmls.*#?\s*\d{4,10}|\bbroker\b|\brealtor\b|\bagent\b', lower):
@@ -1882,7 +1938,7 @@ async def scan(req: ScanRequest, request: Request):
                 log.info(f"No DRE number found in page text for {url}")
 
         # --- Entity classification ---
-        entity_type = classify_entity(text)
+        entity_type = classify_entity(text, dre_info=dre_info)
         if entity_type != 'standard':
             log.info(f"Entity classified as '{entity_type}' for {url}")
 
@@ -1919,6 +1975,29 @@ async def scan(req: ScanRequest, request: Request):
                 if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage)."
+                    r.fix = ""
+        elif entity_type == 'dfpi_lender':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site is a DFPI/CFL-licensed lender (not DRE-licensed). DRE license and responsible broker rules apply only to DRE licensees."
+                    r.fix = ""
+                # Swap EHO for EHL if needed — DFPI lenders need Equal Housing Lender
+                if r.id == 'equal_housing' and r.status == 'fail':
+                    r.status = 'skip'
+                    r.description = f"DFPI lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
+                    r.fix = ""
+        elif entity_type == 'national_bank':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — national bank/credit union regulated by federal agencies (OCC/NCUA/FDIC), not DRE."
+                    r.fix = ""
+        elif entity_type in ('recruiting_site', 'blog_or_parked'):
+            for r in rule_results:
+                if r.status in ('fail', 'warn'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as {entity_type.replace('_', ' ')}."
                     r.fix = ""
 
         # --- Shared checks (both professions) ---
@@ -2641,7 +2720,7 @@ async def api_scan(req: ApiScanRequest, request: Request):
                 log.info(f"[api_scan] No DRE number found for {url}")
 
         # --- Entity classification ---
-        entity_type = classify_entity(text)
+        entity_type = classify_entity(text, dre_info=dre_info)
         if entity_type != 'standard':
             log.info(f"[api_scan] Entity classified as '{entity_type}' for {url}")
 
@@ -2678,6 +2757,28 @@ async def api_scan(req: ApiScanRequest, request: Request):
                 if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage)."
+                    r.fix = ""
+        elif entity_type == 'dfpi_lender':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site is a DFPI/CFL-licensed lender (not DRE-licensed). DRE license and responsible broker rules apply only to DRE licensees."
+                    r.fix = ""
+                if r.id == 'equal_housing' and r.status == 'fail':
+                    r.status = 'skip'
+                    r.description = f"DFPI lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
+                    r.fix = ""
+        elif entity_type == 'national_bank':
+            for r in rule_results:
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — national bank/credit union regulated by federal agencies (OCC/NCUA/FDIC), not DRE."
+                    r.fix = ""
+        elif entity_type in ('recruiting_site', 'blog_or_parked'):
+            for r in rule_results:
+                if r.status in ('fail', 'warn'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site classified as {entity_type.replace('_', ' ')}."
                     r.fix = ""
 
         ai_check = await check_ai_crawler_blocking(final_url)
