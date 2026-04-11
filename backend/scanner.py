@@ -972,10 +972,10 @@ async def lookup_dfpi(company_name: str) -> bool:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(DFPI_SEARCH_URL, params={
-                "q": f'"{company_name}"',
+                "q": f'"{company_name}" AND "License Number"',
                 "fq": 'ss_content_type_s:"Regulated Entity"',
                 "wt": "json",
-                "rows": 5,
+                "rows": 10,
             }, headers={"Authorization": f"Token {DFPI_AUTH_TOKEN}"})
 
             if r.status_code != 200:
@@ -985,17 +985,34 @@ async def lookup_dfpi(company_name: str) -> bool:
 
             data = r.json()
             docs = data.get("response", {}).get("docs", [])
+            # Normalize: lowercase, hyphens→spaces, strip other punctuation
+            search_norm = re.sub(r'[^a-z0-9\s]', ' ', company_name.strip().lower())
+            search_norm = re.sub(r'\s+', ' ', search_norm).strip()
             for doc in docs:
                 xpath = doc.get("custom_xpath_t", "")
-                # Check for active CFL or CRMLA license
-                if "Status: Active" in xpath:
-                    lic_match = re.search(r'License Number:\s*(\S+)', xpath)
-                    lic_num = lic_match.group(1) if lic_match else ""
-                    # CFL licenses start with 60DBO, CRMLA with 41DBO
-                    if "DBO" in lic_num or "CFL" in xpath.upper() or "CRMLA" in xpath.upper() or "Finance Lender" in xpath:
-                        log.info(f"DFPI match: '{company_name}' -> {doc.get('title_t', '')} (lic: {lic_num})")
-                        _DFPI_CACHE[name_key] = True
-                        return True
+                title = (doc.get("title_t", "") or "").lower()
+                title_norm = re.sub(r'[^a-z0-9\s]', ' ', title)
+                title_norm = re.sub(r'\s+', ' ', title_norm).strip()
+                # Verify the result title actually contains our search term
+                if search_norm not in title_norm:
+                    continue
+                # Check for active license
+                if "Status: Active" not in xpath:
+                    continue
+                lic_match = re.search(r'License Number:\s*(\S+)', xpath)
+                lic_num = lic_match.group(1) if lic_match else ""
+                # DFPI license formats: 60DBO-xxx (CFL), 41DBO-xxx (CRMLA),
+                # 41DFPI-xxx, 60DFPI-xxx, or older bare numeric (4130968, 6030xxx)
+                is_dfpi_lic = bool(
+                    "DBO" in lic_num or "DFPI" in lic_num
+                    or re.match(r'^(41|60)\d{4,8}$', lic_num)
+                    or "CFL" in xpath.upper() or "CRMLA" in xpath.upper()
+                    or "Finance Lender" in xpath
+                )
+                if is_dfpi_lic:
+                    log.info(f"DFPI match: '{company_name}' -> {doc.get('title_t', '')} (lic: {lic_num})")
+                    _DFPI_CACHE[name_key] = True
+                    return True
 
     except Exception as e:
         log.warning(f"DFPI lookup error for '{company_name}': {e}")
