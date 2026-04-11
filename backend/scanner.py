@@ -949,6 +949,115 @@ async def lookup_dre_info(license_number: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# DFPI regulated entity lookup (async) — via SearchStax/Solr public API
+# ---------------------------------------------------------------------------
+_DFPI_CACHE: dict[str, bool] = {}  # company_name_lower -> True/False
+
+DFPI_SEARCH_URL = "https://searchcloud-1-us-west-2.searchstax.com/29847/dfpiprod-1839/emselect"
+DFPI_AUTH_TOKEN = "cd1f7b503538c28008a908b324dcc2e8c60a4a3e"
+
+
+async def lookup_dfpi(company_name: str) -> bool:
+    """
+    Check if a company is DFPI-regulated by searching the CA DFPI regulated
+    entities list. Returns True if an active CFL/CRMLA license is found.
+    Results are cached.
+    """
+    name_key = company_name.strip().lower()
+    if not name_key or len(name_key) < 3:
+        return False
+    if name_key in _DFPI_CACHE:
+        return _DFPI_CACHE[name_key]
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(DFPI_SEARCH_URL, params={
+                "q": f'"{company_name}"',
+                "fq": 'ss_content_type_s:"Regulated Entity"',
+                "wt": "json",
+                "rows": 5,
+            }, headers={"Authorization": f"Token {DFPI_AUTH_TOKEN}"})
+
+            if r.status_code != 200:
+                log.warning(f"DFPI lookup failed for '{company_name}': HTTP {r.status_code}")
+                _DFPI_CACHE[name_key] = False
+                return False
+
+            data = r.json()
+            docs = data.get("response", {}).get("docs", [])
+            for doc in docs:
+                xpath = doc.get("custom_xpath_t", "")
+                # Check for active CFL or CRMLA license
+                if "Status: Active" in xpath:
+                    lic_match = re.search(r'License Number:\s*(\S+)', xpath)
+                    lic_num = lic_match.group(1) if lic_match else ""
+                    # CFL licenses start with 60DBO, CRMLA with 41DBO
+                    if "DBO" in lic_num or "CFL" in xpath.upper() or "CRMLA" in xpath.upper() or "Finance Lender" in xpath:
+                        log.info(f"DFPI match: '{company_name}' -> {doc.get('title_t', '')} (lic: {lic_num})")
+                        _DFPI_CACHE[name_key] = True
+                        return True
+
+    except Exception as e:
+        log.warning(f"DFPI lookup error for '{company_name}': {e}")
+
+    _DFPI_CACHE[name_key] = False
+    return False
+
+
+def extract_company_name(text: str) -> str:
+    """Extract the most likely company name from page text for DFPI lookup."""
+    lower = text.lower()
+    # Try common patterns: "Company Name" followed by NMLS, LLC, Inc, Corp
+    # Look for copyright line first — most reliable
+    copy_match = re.search(
+        r'(?:©|\bcopyright\b)[^a-zA-Z]*(?:\d{4}[^a-zA-Z]*)?([A-Z][A-Za-z\s&\',.-]{2,50}(?:LLC|Inc|Corp|Corporation|Company|Co|Group|Lending|Mortgage|Financial|Capital|Loan|Loans|Bank|Services)\.?)',
+        text)
+    if copy_match:
+        return copy_match.group(1).strip().rstrip('.')
+
+    # Try "powered by" or "a division of" or "DBA of"
+    dba_match = re.search(
+        r'(?:d/?b/?a\s+(?:of\s+)?|a\s+division\s+of\s+|a\s+brand\s+of\s+|powered\s+by\s+)([A-Z][A-Za-z\s&\',.-]{2,50}(?:LLC|Inc|Corp|Corporation|Company|Co|Group|Lending|Mortgage|Financial|Capital|Loan|Loans|Bank|Services)\.?)',
+        text, re.I)
+    if dba_match:
+        return dba_match.group(1).strip().rstrip('.')
+
+    # Look for NMLS adjacent company name (with suffix)
+    nmls_match = re.search(
+        r'([A-Z][A-Za-z\s&\',.-]{2,50}(?:LLC|Inc|Corp|Corporation|Company|Co|Group|Lending|Mortgage|Financial|Capital|Loan|Loans|Bank|Services)\.?)\s*[,|·\-—]?\s*(?:NMLS|nmls)\s*#?\s*\d',
+        text)
+    if nmls_match:
+        return nmls_match.group(1).strip().rstrip('.')
+
+    # Broader: copyright line without requiring LLC/Inc suffix
+    copy_broad = re.search(
+        r'(?:©|\bcopyright\b)[^a-zA-Z]*(?:\d{4}[^a-zA-Z]*)?([A-Z][A-Za-z\s&\',.-]{3,40})',
+        text)
+    if copy_broad:
+        name = copy_broad.group(1).strip().rstrip('.')
+        # Only use if it looks like a business name (2+ words)
+        if len(name.split()) >= 2:
+            return name
+
+    # Broader NMLS: "Company NMLS: 123456" or "Company NMLS #123456"
+    nmls_broad = re.search(
+        r'(?:company\s+)?(?:NMLS|nmls)\s*(?::|#|ID)?\s*(\d{4,10})',
+        text)
+    if nmls_broad:
+        # Try to find the company name before "NMLS" — look back from match
+        pos = nmls_broad.start()
+        preceding = text[max(0, pos-100):pos]
+        # Grab last capitalized phrase before NMLS
+        name_before = re.findall(r'([A-Z][A-Za-z\s&\',.-]{2,40})', preceding)
+        if name_before:
+            candidate = name_before[-1].strip()
+            if len(candidate.split()) >= 2:
+                return candidate
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Platform / web developer detection
 # ---------------------------------------------------------------------------
 _PLATFORM_SIGNATURES = [
@@ -1027,7 +1136,7 @@ def _detect_platform(html: str, head_html: str, url: str) -> str:
 # ---------------------------------------------------------------------------
 # Entity classification — detect non-brokerage entities to skip inapplicable checks
 # ---------------------------------------------------------------------------
-def classify_entity(text: str, dre_info: dict = None) -> str:
+def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = False) -> str:
     """
     Classify the website entity type from page content.
     Returns one of: 'nonprofit', 'commercial_developer', 'property_manager',
@@ -1036,7 +1145,13 @@ def classify_entity(text: str, dre_info: dict = None) -> str:
     """
     lower = text.lower()
 
-    # --- DFPI/CFL lender detection ---
+    # --- DFPI confirmed via external lookup ---
+    if dfpi_confirmed:
+        has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}', lower))
+        if not has_dre_license:
+            return 'dfpi_lender'
+
+    # --- DFPI/CFL lender detection (text signals) ---
     # These are mortgage companies licensed under CA Finance Lenders Law (DFPI),
     # NOT under DRE. DRE-specific rules (dre_license, responsible_broker) don't apply.
     # Key signals: DFPI/CFL license references, "licensed by the Department of Financial
@@ -1945,8 +2060,18 @@ async def scan(req: ScanRequest, request: Request):
             else:
                 log.info(f"No DRE number found in page text for {url}")
 
+        # --- DFPI lookup (for entity classification + marketing sorting) ---
+        dfpi_confirmed = False
+        if not dre_info or not dre_info.get("name"):
+            # No DRE license found — check if company is DFPI-regulated
+            company_name = extract_company_name(text)
+            if company_name:
+                dfpi_confirmed = await lookup_dfpi(company_name)
+                if dfpi_confirmed:
+                    log.info(f"DFPI confirmed via lookup: '{company_name}' for {url}")
+
         # --- Entity classification ---
-        entity_type = classify_entity(text, dre_info=dre_info)
+        entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed)
         if entity_type != 'standard':
             log.info(f"Entity classified as '{entity_type}' for {url}")
 
@@ -2727,8 +2852,17 @@ async def api_scan(req: ApiScanRequest, request: Request):
             else:
                 log.info(f"[api_scan] No DRE number found for {url}")
 
+        # --- DFPI lookup (for entity classification + marketing sorting) ---
+        dfpi_confirmed = False
+        if not dre_info or not dre_info.get("name"):
+            company_name = extract_company_name(text)
+            if company_name:
+                dfpi_confirmed = await lookup_dfpi(company_name)
+                if dfpi_confirmed:
+                    log.info(f"[api_scan] DFPI confirmed via lookup: '{company_name}' for {url}")
+
         # --- Entity classification ---
-        entity_type = classify_entity(text, dre_info=dre_info)
+        entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed)
         if entity_type != 'standard':
             log.info(f"[api_scan] Entity classified as '{entity_type}' for {url}")
 
