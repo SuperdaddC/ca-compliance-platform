@@ -1060,13 +1060,10 @@ def classify_entity(text: str, dre_info: dict = None) -> str:
         if not has_dre_license:
             return 'dfpi_lender'
 
-    # Also detect via DRE lookup: if we looked up a license and found nothing,
-    # but the site has NMLS, it's likely DFPI
-    if dre_info is None and re.search(r'\bnmls\s*#?\s*\d{4,10}', lower):
-        # Has NMLS but no DRE number found — check for lending language
-        if re.search(r'mortgage|home\s+loan|refinanc|lending|lender', lower):
-            if not re.search(r'\bdre\s*#?\s*\d{7,9}', lower):
-                return 'dfpi_lender'
+    # REMOVED: NMLS fallback was too aggressive. A DRE mortgage broker who
+    # fails to display their DRE# (which is a violation we should flag) was
+    # getting reclassified as DFPI, which then skipped the DRE rules.
+    # Only classify as dfpi_lender when there's an EXPLICIT DFPI/CFL reference.
 
     # --- National bank / credit union ---
     # Federal institutions regulated by OCC/NCUA/FDIC, not DRE
@@ -1088,9 +1085,20 @@ def classify_entity(text: str, dre_info: dict = None) -> str:
         if not re.search(r'(?:buy|sell|purchase|listing|home\s+search|property\s+search|mls)', lower):
             return 'recruiting_site'
 
-    # --- Blog / informational (no active business) ---
-    if re.search(r'this\s+domain\s+(?:is|may\s+be)\s+for\s+sale|parked\s+(?:domain|page|by)|under\s+construction|coming\s+soon|site\s+not\s+available', lower):
-        return 'blog_or_parked'
+    # --- Parked / dead domain (no active business) ---
+    # Only trigger on strong parked-domain signals. "coming soon" and "under construction"
+    # are too generic — they appear on legitimate RE sites with sections in progress.
+    parked_signals = re.search(
+        r'this\s+domain\s+(?:is|may\s+be)\s+for\s+sale'
+        r'|parked\s+(?:domain|page|by)'
+        r'|this\s+site\s+(?:is\s+)?(?:no\s+longer|not)\s+available'
+        r'|domain\s+(?:has\s+)?expir(?:ed|es)'
+        r'|buy\s+this\s+domain'
+        , lower)
+    if parked_signals:
+        # Make sure it's not a legit RE site that just mentions domains
+        if not re.search(r'\bdre\b|\bnmls\b|\bbroker\b|\bagent\b|\brealtor\b|\blisting\b|\bmortgage\b', lower):
+            return 'blog_or_parked'
 
     # Nonprofit signals — require STRONG self-identification
     nonprofit_strong = re.search(
