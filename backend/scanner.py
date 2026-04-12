@@ -684,10 +684,19 @@ async def scrape_website(url: str) -> dict:
                     const h = img.naturalHeight || img.height;
                     const dataSrc = (img.getAttribute('data-src') || img.dataset.src || '').toLowerCase();
                     const dataSrcset = (img.getAttribute('data-srcset') || '').toLowerCase();
-                    // For lazy-loaded images, skip size check (may not have loaded yet)
-                    const hasSize = w >= 15 && w <= 120 && h >= 15 && h <= 120;
+                    // Size check: EHO logos are small (15-200px). Allow lazy images only if
+                    // they have declared width/height in the small range, or no dimensions yet.
+                    const hasSize = w > 0 && h > 0;
+                    const isSmall = w >= 15 && w <= 200 && h >= 15 && h <= 200;
                     const isLazy = !!(dataSrc || dataSrcset);
+                    // If we know the size and it's too big, skip (not an EHO logo)
+                    if (hasSize && !isSmall) return;
+                    // If no size and not lazy, skip
                     if (!hasSize && !isLazy) return;
+                    // Check declared HTML width/height attributes for lazy images
+                    const declW = parseInt(img.getAttribute('width')) || 0;
+                    const declH = parseInt(img.getAttribute('height')) || 0;
+                    if (declW > 200 || declH > 200) return;
                     const src = (img.src || '').toLowerCase();
                     const alt = (img.alt || '').toLowerCase();
                     const allSrc = src + ' ' + dataSrc + ' ' + dataSrcset + ' ' + alt;
