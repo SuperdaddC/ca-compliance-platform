@@ -700,15 +700,16 @@ async def scrape_website(url: str) -> dict:
                     const src = (img.src || '').toLowerCase();
                     const alt = (img.alt || '').toLowerCase();
                     const allSrc = src + ' ' + dataSrc + ' ' + dataSrcset + ' ' + alt;
-                    // Skip known non-EHO images (but keep generic "logo"/"footer-logo" — EHO is often named that way)
-                    if (/social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor|mls-logo|company.?logo|brand.?logo|site.?logo/i.test(alt + src + dataSrc))
+                    // Skip known non-EHO images
+                    if (/social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor|google|pexels|unsplash|stock/i.test(alt + src + dataSrc))
                         return;
-                    // Skip icon-class images (not logo-class — EHO logos need to pass through)
-                    if (/\bicon\b/i.test(alt) && !/equal|eho|fair|housing/i.test(alt + src + dataSrc))
-                        return;
-                    // Already captured above? Skip
+                    // Already captured by primary detection? Skip
                     if (test(allSrc)) return;
-                    // This is a small footer image with no recognizable alt — potential EHO
+                    // Only accept as potential EHO if filename/alt contains "logo" or "footer"
+                    // (EHO logos are commonly named "footer-logo", "Footer-logos-1", etc.)
+                    // Random images (UUIDs, photos, Google avatars) are excluded
+                    const hasLogoHint = /logo|footer.*img|eho|equal|housing|fair/i.test(alt + ' ' + (dataSrc || src));
+                    if (!hasLogoHint) return;
                     const displaySrc = dataSrc || src;
                     signals.push('footer-img:' + w + 'x' + h + ':' + displaySrc.substring(displaySrc.lastIndexOf('/') + 1, displaySrc.lastIndexOf('/') + 40));
                 });
