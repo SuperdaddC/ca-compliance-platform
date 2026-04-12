@@ -778,6 +778,33 @@ async def scrape_website(url: str) -> dict:
             }""")
             log.info(f"EHO DOM signals for {url}: {eho_signals}")
 
+            # Check iframes for EHO content (some platforms render footer in iframes)
+            if not eho_signals:
+                try:
+                    for frame in page.frames:
+                        if frame == page.main_frame:
+                            continue
+                        try:
+                            frame_text = await frame.evaluate("() => document.body ? document.body.textContent.toLowerCase() : ''")
+                            if re.search(r'equal\s*housing', frame_text):
+                                has_lender = bool(re.search(r'lender', frame_text))
+                                snippet = re.search(r'(.{0,20}equal.?housing.{0,30})', frame_text)
+                                eho_signals.append(f"iframe:{('lender:' if has_lender else '')}{snippet.group(1).strip()[:60] if snippet else 'found'}")
+                                log.info(f"EHO found in iframe: {frame.url[:80]}")
+                                break
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log.debug(f"Iframe EHO check error: {e}")
+
+            # Diagnostic: log what's actually in the page text for debugging EHO misses
+            if not eho_signals:
+                main_tc_len = await page.evaluate("() => (document.body.textContent || '').length")
+                has_equal = await page.evaluate("() => (document.body.textContent || '').toLowerCase().includes('equal')")
+                has_housing = await page.evaluate("() => (document.body.textContent || '').toLowerCase().includes('housing')")
+                iframe_count = len(page.frames) - 1
+                log.info(f"EHO miss diagnostic for {url}: textContent={main_tc_len} chars, has 'equal'={has_equal}, has 'housing'={has_housing}, iframes={iframe_count}")
+
             # Save the homepage URL before navigating away
             homepage_url = page.url
 
@@ -1542,7 +1569,7 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
     has_img  = bool(EHO_IMG_RE.search(html))
     strong_dom = [s for s in (eho_signals or [])
                   if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:', 'icon:',
-                                   'textContent:', 'widget:', 'widget-img:'))]
+                                   'textContent:', 'widget:', 'widget-img:', 'iframe:'))]
     has_dom = bool(strong_dom)
     if has_text or has_img or has_dom:
         evidence = ""
