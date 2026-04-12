@@ -570,7 +570,13 @@ async def scrape_website(url: str) -> dict:
             if needs_extra_wait:
                 log.info(f"Platform-specific extra wait for {current_url}")
                 await page.wait_for_timeout(3000)
-                # One more scroll after extra wait
+                # Incremental scroll to trigger IntersectionObserver-based lazy loading
+                # (jumping to scrollHeight doesn't fire observers for mid-page elements)
+                total_height = await page.evaluate("() => document.body.scrollHeight")
+                step = max(400, total_height // 10)
+                for pos in range(0, total_height + step, step):
+                    await page.evaluate(f"window.scrollTo(0, {pos})")
+                    await page.wait_for_timeout(150)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(2000)
 
@@ -739,16 +745,32 @@ async def scrape_website(url: str) -> dict:
                     } catch(e) {}
                 }
 
-                // Debug: capture footer text and image info
-                const footerEl = document.querySelector('footer') || document.querySelector('[class*="footer"]') || document.querySelector('[id*="footer"]');
-                if (footerEl) {
-                    const footerText = (footerEl.textContent || '').trim().substring(0, 200);
-                    signals.push('_debug_footer_text:' + footerText);
-                    footerEl.querySelectorAll('img').forEach(img => {
-                        const src = img.src || '';
-                        const dataSrc = img.getAttribute('data-src') || '';
-                        const alt = img.alt || '';
-                        signals.push('_debug_footer_img:' + 'src=' + src.substring(0, 60) + '|alt=' + alt + '|data-src=' + dataSrc.substring(0, 60));
+                // Fallback: check textContent for EHO text (catches CSS-hidden / lazy-loaded content
+                // that innerText misses, and elements in non-standard footer containers)
+                if (signals.filter(s => !s.startsWith('_debug')).length === 0) {
+                    const bodyTC = (document.body.textContent || '').toLowerCase();
+                    if (kwFull.test(bodyTC)) {
+                        const match = bodyTC.match(/(.{0,20})(equal.?housing.{0,30})/i);
+                        if (match) {
+                            const hasLender = kwLender.test(match[2]);
+                            signals.push('textContent:' + (hasLender ? 'lender:' : '') + (match[1] + match[2]).trim().substring(0, 80));
+                        }
+                    }
+                }
+
+                // Fallback: check bottom-of-page widgets (AgentFire cbl__widget, etc.)
+                if (signals.filter(s => !s.startsWith('_debug') && !s.startsWith('textContent')).length === 0) {
+                    const bottomEls = document.querySelectorAll('[class*="cbl__widget"], [class*="widget-area"], [class*="site-footer"], [class*="footer-widget"], [role="contentinfo"]');
+                    bottomEls.forEach(el => {
+                        const txt = (el.textContent || '').trim();
+                        if (kwFull.test(txt)) {
+                            const hasLender = kwLender.test(txt);
+                            signals.push('widget:' + (hasLender ? 'lender:' : '') + txt.substring(0, 80));
+                        }
+                        el.querySelectorAll('img').forEach(img => {
+                            const src = (img.src || '') + ' ' + (img.getAttribute('data-src') || '') + ' ' + (img.alt || '');
+                            if (test(src)) signals.push('widget-img:' + src.substring(0, 80));
+                        });
                     });
                 }
 
@@ -1519,7 +1541,8 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
     has_text = bool(EQUAL_HOUSING_RE.search(text))
     has_img  = bool(EHO_IMG_RE.search(html))
     strong_dom = [s for s in (eho_signals or [])
-                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:', 'icon:'))]
+                  if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:', 'icon:',
+                                   'textContent:', 'widget:', 'widget-img:'))]
     has_dom = bool(strong_dom)
     if has_text or has_img or has_dom:
         evidence = ""
