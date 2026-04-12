@@ -808,7 +808,12 @@ EHO_IMG_RE     = re.compile(
     r'|fair[_\-.\s]?housing'
     r'|equal[_\-.\s]?opportunity)', re.I)
 CCPA_RE        = re.compile(r'privacy\s+(policy|notice|statement|and\s+terms|&\s+terms)|ccpa|do\s+not\s+sell', re.I)
-DO_NOT_SELL_RE = re.compile(r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)', re.I)
+DO_NOT_SELL_RE = re.compile(
+    r'do\s+not\s+sell(\s+or\s+share)?\s+(my|personal)'   # "Do Not Sell My Personal Info"
+    r'|do\s+not\s+share\s+(my|personal)'                  # "Do Not Share My Personal Info"
+    r'|limit\s+the\s+use\s+of\s+(my|personal)'            # "Limit The Use of My Personal Info"
+    r'|opt[\-\s]?out\s+of\s+(sale|sharing|sell)'           # "Opt-Out of Sale/Sharing"
+    , re.I)
 ADA_RE         = re.compile(r'accessibility\s+(statement|policy|commitment|pledge|notice)|ada\s+complian|wcag|section\s+508|web\s+accessibility', re.I)
 PHYSICAL_ADDR_RE = re.compile(
     r'\b\d{2,5}\s+[A-Z][a-z]+.*?'
@@ -1582,7 +1587,7 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
                   bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
                   _has_own_privacy_link(html)
     has_dns     = DO_NOT_SELL_RE.search(all_privacy_text) or \
-                  bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
+                  bool(re.search(r'do[\-_\s]*not[\-_\s]*(?:sell|share)|limit[\-_\s]*the[\-_\s]*use', html, re.I))
     # Check privacy subpage for CCPA-specific content
     has_ccpa_on_subpage = bool(re.search(
         r'california\s+consumer\s+privacy|ccpa|cpra|right\s+to\s+(?:know|delete|opt)|california\s+privacy\s+rights',
@@ -1751,7 +1756,7 @@ def run_lending_checks(text: str, html: str, eho_signals: list = None,
                   bool(re.search(r'(href|link|url).*?privacy[\-_\s]?policy|privacy[\-_\s]?policy.*?(href|link|url)', html, re.I)) or \
                   _has_own_privacy_link(html)
     has_dns     = DO_NOT_SELL_RE.search(all_privacy_text) or \
-                  bool(re.search(r'do[\-_\s]*not[\-_\s]*sell', html, re.I))
+                  bool(re.search(r'do[\-_\s]*not[\-_\s]*(?:sell|share)|limit[\-_\s]*the[\-_\s]*use', html, re.I))
     has_ccpa_on_subpage = bool(re.search(
         r'california\s+consumer\s+privacy|ccpa|cpra|right\s+to\s+(?:know|delete|opt)|california\s+privacy\s+rights',
         privacy_page_text, re.I)) if privacy_page_text else False
