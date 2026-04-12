@@ -1578,13 +1578,30 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
             regulation="Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
             fix=f"Add your supervising broker's name and DRE number to your footer: '{rb_name}, DRE #{rb_lic}'." if rb_lic else "Add your supervising broker's name and DRE number to your footer."))
     else:
-        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "fail",
-            "No responsible or supervising broker identified on this page.",
-            detail="Your website must identify the supervising/responsible broker by name and DRE license number.",
-            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
-            regulation="California Business & Professions Code §10159.5 — Salesperson advertising must include broker identity. Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
-            fix="Add to your site footer: '[Your Name], DRE #[Your Number] | [Brokerage Name], DRE #[Broker Number]'.",
-            webmaster_email=WM_RESPONSIBLE_BROKER))
+        # Before failing, check if this looks like a mortgage/lending site rather than a DRE agent.
+        # DFPI-licensed lenders don't need a responsible broker — only DRE licensees do.
+        # Heuristic: NMLS present + mortgage/lending keywords + no DRE = likely DFPI lender
+        has_nmls = bool(re.search(r'\bnmls\s*(?:#|id|number)?\s*\d{4,}', text, re.I))
+        has_lending_signals = bool(re.search(
+            r'\bmortgage\s+(?:lend|bank|company|corp|inc|llc|group)'
+            r'|\bloan\s+(?:officer|originator|consultant)'
+            r'|\bmortgage\s+(?:broker|officer|advisor|consultant)'
+            r'|\b(?:home|residential)\s+(?:loan|lending|mortgage)'
+            r'|\bnationwide\s+mortgage\s+licensing'
+            , text, re.I))
+        if has_nmls and has_lending_signals and not dre_on_page:
+            results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "skip",
+                "Site appears to be a mortgage lender (NMLS present, no DRE license). Responsible broker disclosure applies only to DRE licensees.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="California Business & Professions Code §10159.5 — Applies to DRE-licensed salespersons only. Mortgage lenders licensed under DFPI/CFL are not subject to DRE broker disclosure requirements."))
+        else:
+            results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "fail",
+                "No responsible or supervising broker identified on this page.",
+                detail="Your website must identify the supervising/responsible broker by name and DRE license number.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="California Business & Professions Code §10159.5 — Salesperson advertising must include broker identity. Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
+                fix="Add to your site footer: '[Your Name], DRE #[Your Number] | [Brokerage Name], DRE #[Broker Number]'.",
+                webmaster_email=WM_RESPONSIBLE_BROKER))
 
     # 3. Equal Housing Opportunity
     #    Three-tier detection: text regex, HTML img regex, browser DOM signals
