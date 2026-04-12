@@ -824,32 +824,10 @@ async def scrape_website(url: str) -> dict:
                 except Exception as e:
                     log.debug(f"Iframe EHO check error: {e}")
 
-            # Diagnostic: log what's actually in the page text for debugging EHO misses
+            # Log EHO misses for future debugging (lightweight)
             if not eho_signals:
-                diag = await page.evaluate("""() => {
-                    const tc = (document.body.textContent || '').toLowerCase();
-                    const html = (document.body.innerHTML || '').toLowerCase();
-                    const hasEqualTC = tc.includes('equal');
-                    const hasHousingTC = tc.includes('housing');
-                    const hasEqualHTML = html.includes('equal');
-                    const hasHousingHTML = html.includes('housing');
-                    const hasCblWidget = html.includes('cbl__widget');
-                    const hasFooter = html.includes('footer');
-                    const lastHTML = html.slice(-500);
-                    const widgetCount = (html.match(/cbl__widget/g) || []).length;
-                    return {tcLen: tc.length, htmlLen: html.length,
-                            equalTC: hasEqualTC, housingTC: hasHousingTC,
-                            equalHTML: hasEqualHTML, housingHTML: hasHousingHTML,
-                            cblWidget: hasCblWidget, widgetCount: widgetCount,
-                            hasFooter: hasFooter, lastHTML: lastHTML};
-                }""")
                 iframe_count = len(page.frames) - 1
-                log.info(f"EHO miss diagnostic for {url}: tc={diag['tcLen']}c html={diag['htmlLen']}c "
-                         f"equal(tc={diag['equalTC']},html={diag['equalHTML']}) "
-                         f"housing(tc={diag['housingTC']},html={diag['housingHTML']}) "
-                         f"cbl_widget={diag['cblWidget']}({diag['widgetCount']}) "
-                         f"footer={diag['hasFooter']} iframes={iframe_count}")
-                log.info(f"EHO last 500 HTML: {diag['lastHTML'][:300]}")
+                log.info(f"EHO miss for {url}: iframes={iframe_count}")
 
             # Save the homepage URL before navigating away
             homepage_url = page.url
