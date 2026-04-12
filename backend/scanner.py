@@ -1410,7 +1410,19 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
     results = []
 
     # 1. DRE license number
-    if DRE_LICENSE_RE.search(text):
+    #    Primary: labeled regex. Fallback: if we found a DRE number via bare 8-digit
+    #    lookup and it verified in DRE, the number IS on the page — pass it.
+    dre_on_page = bool(DRE_LICENSE_RE.search(text))
+    if not dre_on_page and dre_number and dre_info and dre_info.get("name"):
+        # The bare 8-digit fallback found it and DRE confirmed it's valid.
+        # Log the surrounding text so we can improve the regex later.
+        num_pos = text.find(dre_number)
+        if num_pos >= 0:
+            context = text[max(0, num_pos-30):num_pos+len(dre_number)+5].strip()
+            log.info(f"DRE number found via fallback but not regex. Context: '{context}' — consider adding this pattern to DRE_LICENSE_RE")
+        dre_on_page = True
+
+    if dre_on_page:
         results.append(RuleResult("dre_license", "DRE License Number Display", "pass",
             "DRE license number found on page.",
             source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
