@@ -558,9 +558,15 @@ async def scrape_website(url: str) -> dict:
 
             # Platform-specific extra wait for JS-heavy franchise sites
             current_url = page.url.lower()
-            if any(p in current_url for p in ['.kw.com', 'kw.com/', 'compass.com', 'exprealty.com',
-                                               'realtyonegroup.com', 'c21', 'century21',
-                                               'bhhs.com', 'coldwellbanker', 'sothebysrealty']):
+            # Check URL-based platforms and also peek at page HTML for platform hints
+            page_html_peek = await page.evaluate("() => document.documentElement.outerHTML.substring(0, 5000)") or ""
+            needs_extra_wait = (
+                any(p in current_url for p in ['.kw.com', 'kw.com/', 'compass.com', 'exprealty.com',
+                                                'realtyonegroup.com', 'c21', 'century21',
+                                                'bhhs.com', 'coldwellbanker', 'sothebysrealty'])
+                or any(p in page_html_peek.lower() for p in ['agentfire', 'thesparksite', 'flavor="developer_flavor"'])
+            )
+            if needs_extra_wait:
                 log.info(f"Platform-specific extra wait for {current_url}")
                 await page.wait_for_timeout(3000)
                 # One more scroll after extra wait
@@ -625,31 +631,45 @@ async def scrape_website(url: str) -> dict:
                     } catch(e) { return false; }
                 };
 
-                // Check all img src, alt, and title
+                // Check all img src, alt, title, AND data-src/data-srcset (lazy-loaded images)
                 document.querySelectorAll('img').forEach(img => {
-                    if (!isVisible(img) || !isRendered(img)) return;
-                    if (test(img.src) || test(img.alt || '') || test(img.title || ''))
-                        signals.push('img:' + (img.alt || img.src).substring(0, 80));
+                    if (!isVisible(img)) return;
+                    const src = img.src || '';
+                    const dataSrc = img.getAttribute('data-src') || img.dataset.src || '';
+                    const dataSrcset = img.getAttribute('data-srcset') || '';
+                    const alt = img.alt || '';
+                    const title = img.title || '';
+                    const allText = src + ' ' + dataSrc + ' ' + dataSrcset + ' ' + alt + ' ' + title;
+                    // For lazy-loaded images, skip the isRendered check (they may still be placeholders)
+                    const rendered = isRendered(img);
+                    if (!rendered && !dataSrc && !dataSrcset) return;
+                    if (test(allText))
+                        signals.push('img:' + (alt || dataSrc || src).substring(0, 80));
                 });
 
                 // Check for small square-ish images in footer with no alt text
                 // (common pattern for EHO logos with UUID filenames)
                 document.querySelectorAll('footer img, [class*="footer"] img, [id*="footer"] img').forEach(img => {
-                    if (!isVisible(img) || !isRendered(img)) return;
+                    if (!isVisible(img)) return;
                     const w = img.naturalWidth || img.width;
                     const h = img.naturalHeight || img.height;
-                    // EHO logos are typically 20-80px, roughly square or 2:1 ratio
-                    if (w >= 15 && w <= 120 && h >= 15 && h <= 120) {
-                        const src = (img.src || '').toLowerCase();
-                        const alt = (img.alt || '').toLowerCase();
-                        // Skip known non-EHO images
-                        if (/logo|icon|social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor/i.test(alt + src))
-                            return;
-                        // Already captured above? Skip
-                        if (test(src) || test(alt)) return;
-                        // This is a small footer image with no recognizable alt — potential EHO
-                        signals.push('footer-img:' + w + 'x' + h + ':' + src.substring(src.lastIndexOf('/') + 1, src.lastIndexOf('/') + 40));
-                    }
+                    const dataSrc = (img.getAttribute('data-src') || img.dataset.src || '').toLowerCase();
+                    const dataSrcset = (img.getAttribute('data-srcset') || '').toLowerCase();
+                    // For lazy-loaded images, skip size check (may not have loaded yet)
+                    const hasSize = w >= 15 && w <= 120 && h >= 15 && h <= 120;
+                    const isLazy = !!(dataSrc || dataSrcset);
+                    if (!hasSize && !isLazy) return;
+                    const src = (img.src || '').toLowerCase();
+                    const alt = (img.alt || '').toLowerCase();
+                    const allSrc = src + ' ' + dataSrc + ' ' + dataSrcset + ' ' + alt;
+                    // Skip known non-EHO images
+                    if (/logo|icon|social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor/i.test(alt + src + dataSrc))
+                        return;
+                    // Already captured above? Skip
+                    if (test(allSrc)) return;
+                    // This is a small footer image with no recognizable alt — potential EHO
+                    const displaySrc = dataSrc || src;
+                    signals.push('footer-img:' + w + 'x' + h + ':' + displaySrc.substring(displaySrc.lastIndexOf('/') + 1, displaySrc.lastIndexOf('/') + 40));
                 });
 
                 // Also check ALL small images in the bottom 30% of the page
@@ -771,11 +791,11 @@ async def scrape_website(url: str) -> dict:
 
 # --- Shared patterns ---
 DRE_LICENSE_RE = re.compile(
-    r'\bdre\s*(?:no\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "DRE #", "DRE No.", "CA DRE No. 00618471"
-    r'|\bbre\s*(?:no\.?)?\s*[#:.]?\s*\d{7,9}\b' # legacy "BRE #" prefix (pre-2018 branding)
+    r'\bdre\s*(?:(?:no|lic)\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "DRE #", "DRE No.", "DRE Lic. #"
+    r'|\bbre\s*(?:(?:no|lic)\.?)?\s*[#:.]?\s*\d{7,9}\b' # legacy "BRE #" prefix (pre-2018 branding)
     r'|\bcalifornia\s+real\s+estate\s+broker\s*[#:.]?\s*\d{7,9}\b'
     r'|\bcalbre\s*[#:.]?\s*\d{7,9}\b'
-    r'|\bca[\s\-]+dre\s*(?:no\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "CA DRE No. 00618471", "CA-DRE #01234567"
+    r'|\bca[\s\-]+dre\s*(?:(?:no|lic)\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "CA DRE Lic. # 01215391"
     r'|\blicense\s+(?:id|#|number)\s*[#:.]?\s*0[12]\d{6}\b',  # "License ID: 01234567" (DRE format: starts with 0)
     re.I)
 BROKER_DRE_RE  = re.compile(r'\b(broker|brokerage)\s*.{0,30}dre\s*[#:.]?\s*\d{7,9}\b', re.I)
