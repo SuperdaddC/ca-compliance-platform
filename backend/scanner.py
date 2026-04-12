@@ -145,7 +145,7 @@ REVIEW_QUEUE_RULES = {
 # Future allowlist for rules that don't set screenshot_required but may need review
 REVIEW_QUEUE_EXTRA_RULES: set = set()  # e.g., {"ccpa_privacy", "tila_apr"}
 
-SCANNER_VERSION = "v1.2"
+SCANNER_VERSION = "v1.3"
 
 
 # ---------------------------------------------------------------------------
