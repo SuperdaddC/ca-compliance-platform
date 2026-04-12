@@ -558,20 +558,21 @@ async def scrape_website(url: str) -> dict:
 
             # Platform-specific extra wait for JS-heavy franchise sites
             current_url = page.url.lower()
-            # Check URL-based platforms and also peek at page HTML for platform hints
-            page_html_peek = await page.evaluate("() => document.documentElement.outerHTML.substring(0, 5000)") or ""
+            # Check full page HTML for platform hints (not just first 5000 chars)
+            page_html_full = await page.evaluate("() => document.documentElement.outerHTML") or ""
+            page_html_lower = page_html_full.lower()
             needs_extra_wait = (
                 any(p in current_url for p in ['.kw.com', 'kw.com/', 'compass.com', 'exprealty.com',
                                                 'realtyonegroup.com', 'c21', 'century21',
                                                 'bhhs.com', 'coldwellbanker', 'sothebysrealty'])
-                or any(p in page_html_peek.lower() for p in ['agentfire', 'thesparksite', 'flavor="developer_flavor"'])
+                or any(p in page_html_lower for p in ['agentfire', 'thesparksite', 'flavor="developer_flavor"'])
             )
             if needs_extra_wait:
                 log.info(f"Platform-specific extra wait for {current_url}")
                 await page.wait_for_timeout(3000)
                 # One more scroll after extra wait
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(2000)
 
             inner_text = await page.evaluate("() => document.body.innerText") or ""
             raw_html   = await page.evaluate("() => document.body.innerHTML") or ""
@@ -736,6 +737,19 @@ async def scrape_website(url: str) -> dict:
                             }
                         });
                     } catch(e) {}
+                }
+
+                // Debug: capture footer text and image info
+                const footerEl = document.querySelector('footer') || document.querySelector('[class*="footer"]') || document.querySelector('[id*="footer"]');
+                if (footerEl) {
+                    const footerText = (footerEl.textContent || '').trim().substring(0, 200);
+                    signals.push('_debug_footer_text:' + footerText);
+                    footerEl.querySelectorAll('img').forEach(img => {
+                        const src = img.src || '';
+                        const dataSrc = img.getAttribute('data-src') || '';
+                        const alt = img.alt || '';
+                        signals.push('_debug_footer_img:' + 'src=' + src.substring(0, 60) + '|alt=' + alt + '|data-src=' + dataSrc.substring(0, 60));
+                    });
                 }
 
                 return signals;
