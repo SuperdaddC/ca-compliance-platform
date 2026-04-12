@@ -691,8 +691,11 @@ async def scrape_website(url: str) -> dict:
                     const src = (img.src || '').toLowerCase();
                     const alt = (img.alt || '').toLowerCase();
                     const allSrc = src + ' ' + dataSrc + ' ' + dataSrcset + ' ' + alt;
-                    // Skip known non-EHO images
-                    if (/logo|icon|social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor/i.test(alt + src + dataSrc))
+                    // Skip known non-EHO images (but keep generic "logo"/"footer-logo" — EHO is often named that way)
+                    if (/social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor|mls-logo|company.?logo|brand.?logo|site.?logo/i.test(alt + src + dataSrc))
+                        return;
+                    // Skip icon-class images (not logo-class — EHO logos need to pass through)
+                    if (/\bicon\b/i.test(alt) && !/equal|eho|fair|housing/i.test(alt + src + dataSrc))
                         return;
                     // Already captured above? Skip
                     if (test(allSrc)) return;
@@ -709,7 +712,9 @@ async def scrape_website(url: str) -> dict:
                     if (w >= 15 && w <= 120 && h >= 15 && h <= 120) {
                         const src = (img.src || '').toLowerCase();
                         const alt = (img.alt || '').toLowerCase();
-                        if (/logo|icon|social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor/i.test(alt + src))
+                        if (/social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor|mls-logo|company.?logo|brand.?logo|site.?logo/i.test(alt + src))
+                            return;
+                        if (/\bicon\b/i.test(alt) && !/equal|eho|fair|housing/i.test(alt + src))
                             return;
                         if (test(src) || test(alt)) return;
                         // Check if nearby text contains EHO keywords
@@ -1610,7 +1615,7 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
     has_img  = bool(EHO_IMG_RE.search(html))
     strong_dom = [s for s in (eho_signals or [])
                   if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:', 'icon:',
-                                   'textContent:', 'widget:', 'widget-img:', 'iframe:'))]
+                                   'textContent:', 'widget:', 'widget-img:', 'iframe:', 'footer-img:'))]
     has_dom = bool(strong_dom)
     if has_text or has_img or has_dom:
         evidence = ""
