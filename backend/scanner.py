@@ -1581,13 +1581,16 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
         # Before failing, check if this looks like a mortgage/lending site rather than a DRE agent.
         # DFPI-licensed lenders don't need a responsible broker — only DRE licensees do.
         # Heuristic: NMLS present + mortgage/lending keywords + no DRE = likely DFPI lender
-        has_nmls = bool(re.search(r'\bnmls\s*(?:#|id|number)?\s*\d{4,}', text, re.I))
+        has_nmls = bool(re.search(r'\bnmls\s*[:#]?\s*(?:id|lic|number|no)?[.#:]?\s*\d{4,}', text, re.I))
         has_lending_signals = bool(re.search(
             r'\bmortgage\s+(?:lend|bank|company|corp|inc|llc|group)'
-            r'|\bloan\s+(?:officer|originator|consultant)'
+            r'|\bloan\s+(?:officer|originator|consultant|advisor)'
             r'|\bmortgage\s+(?:broker|officer|advisor|consultant)'
             r'|\b(?:home|residential)\s+(?:loan|lending|mortgage)'
             r'|\bnationwide\s+mortgage\s+licensing'
+            r'|\bdirect\s+lender\b'
+            r'|\bmortgage\s+(?:rate|refinanc|pre.?approv)'
+            r'|\b(?:purchase|refinance)\s+(?:loan|mortgage)'
             , text, re.I))
         if has_nmls and has_lending_signals and not dre_on_page:
             results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "skip",
