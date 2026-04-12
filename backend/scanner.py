@@ -495,6 +495,13 @@ async def scrape_website(url: str) -> dict:
         )
         try:
             page = await context.new_page()
+            # Mask headless detection — some platforms defer widget loading for bots
+            await page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => false});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                window.chrome = {runtime: {}};
+            """)
 
             # Navigate — use domcontentloaded instead of networkidle
             # (heavy RE sites with trackers/chat widgets never go fully idle)
