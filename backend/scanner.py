@@ -569,16 +569,31 @@ async def scrape_website(url: str) -> dict:
             )
             if needs_extra_wait:
                 log.info(f"Platform-specific extra wait for {current_url}")
+                # Simulate user interaction to trigger deferred widget loading
+                # (AgentFire and similar defer footer widgets until mouse/touch activity)
+                try:
+                    await page.mouse.move(300, 400)
+                    await page.mouse.move(500, 600)
+                    await page.evaluate("""() => {
+                        document.dispatchEvent(new MouseEvent('mousemove', {clientX: 100, clientY: 100}));
+                        document.dispatchEvent(new Event('touchstart'));
+                        document.dispatchEvent(new Event('scroll'));
+                    }""")
+                except Exception:
+                    pass
                 await page.wait_for_timeout(3000)
-                # Incremental scroll to trigger IntersectionObserver-based lazy loading
-                # (jumping to scrollHeight doesn't fire observers for mid-page elements)
+                # Incremental scroll with mouse.wheel to fire real scroll events
+                # (page.evaluate scrollTo doesn't trigger IntersectionObserver reliably)
                 total_height = await page.evaluate("() => document.body.scrollHeight")
                 step = max(400, total_height // 10)
                 for pos in range(0, total_height + step, step):
-                    await page.evaluate(f"window.scrollTo(0, {pos})")
-                    await page.wait_for_timeout(150)
+                    try:
+                        await page.mouse.wheel(0, step)
+                    except Exception:
+                        await page.evaluate(f"window.scrollTo(0, {pos})")
+                    await page.wait_for_timeout(200)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)
 
             inner_text = await page.evaluate("() => document.body.innerText") or ""
             raw_html   = await page.evaluate("() => document.body.innerHTML") or ""
