@@ -13,6 +13,7 @@ import os
 import time
 import logging
 import uuid
+import urllib.parse
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -710,7 +711,9 @@ async def scrape_website(url: str) -> dict:
                     // (e.g., bareis_101px.png), copyright icons, and random hash filenames.
                     // When EHO text is baked into a composite image without explicit naming,
                     // detection requires OCR (not currently implemented).
-                    const hasEhoHint = /\beho\b|equal.?hous|fair.?hous|housing.?opp|equal.?opp/i.test(alt + ' ' + (dataSrc || src));
+                    let hintTarget = alt + ' ' + (dataSrc || src);
+                    try { hintTarget = decodeURIComponent(hintTarget); } catch(e) {}
+                    const hasEhoHint = /\beho\b|equal.?hous|fair.?hous|housing.?opp|equal.?opp/i.test(hintTarget);
                     if (!hasEhoHint) return;
                     const displaySrc = dataSrc || src;
                     signals.push('footer-img:' + w + 'x' + h + ':' + displaySrc.substring(displaySrc.lastIndexOf('/') + 1, displaySrc.lastIndexOf('/') + 40));
@@ -1422,9 +1425,21 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
         if not re.search(r'\bdre\b.*#?\s*\d{7,9}|nmls.*#?\s*\d{4,10}|\bbroker\b|\brealtor\b|\bagent\b', lower):
             return 'nonprofit'
 
-    # Commercial RE developer/investor (not a brokerage)
-    if re.search(r'multifamily|apartment.{0,30}(?:develop|invest)|commercial\s+real\s+estate\s+invest|private\s+equity.*real\s+estate|fund\s+(?:i|ii|iii|iv|v)\b', lower):
-        if not re.search(r'\bdre\b|\bnmls\b|\bbroker\b|\bagent\b|\brealtor\b', lower):
+    # Commercial RE developer/investor/services (not residential brokerage)
+    # Fair Housing Act covers residential — commercial RE is exempt.
+    commercial_re_signals = re.search(
+        r'multifamily|apartment.{0,30}(?:develop|invest)'
+        r'|commercial\s+real\s+estate'
+        r'|\bcre\s+(?:brokerage|services|advisory|financing|loan|invest|property|property|broker)'
+        r'|private\s+equity.*real\s+estate'
+        r'|fund\s+(?:i|ii|iii|iv|v)\b'
+        r'|industrial\s+(?:property|real\s+estate|leasing)'
+        r'|retail\s+(?:property|real\s+estate|leasing)\s+(?:invest|develop|advisor)'
+        , lower)
+    if commercial_re_signals:
+        # Don't misclassify residential agents who happen to mention commercial
+        has_residential = re.search(r'first[\-\s]?time\s+(?:home)?buyer|home\s+search|residential\s+(?:listing|sale)|open\s+house|property\s+search', lower)
+        if not has_residential and not re.search(r'\bdre\b\s*#?\s*\d{7,9}', lower):
             return 'commercial_developer'
 
     # Property manager only (no sales activity)
@@ -1433,8 +1448,21 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
             return 'property_manager'
 
     # SBA/commercial-only lender (not residential mortgage)
-    if re.search(r'sba\s+504|sba\s+7\s*\(\s*a\s*\)|small\s+business\s+loan|commercial\s+(?:loan|lending|finance)', lower):
-        if not re.search(r'mortgage|home\s+loan|residential\s+(?:loan|lending|mortgage)', lower):
+    # Fair Housing Act applies to residential lending — not SBA/commercial.
+    commercial_lender_signals = re.search(
+        r'sba\s+504|sba\s+7\s*\(\s*a\s*\)'
+        r'|small\s+business\s+(?:loan|lending|financing|administration)'
+        r'|commercial\s+(?:loan|lending|finance|financing|mortgage\s+broker|mortgage\s+lend)'
+        r'|commercial\s+mortgage(?!\s+and\s+residential)'
+        r'|cre\s+(?:loan|lending|finance|financing|mortgage)'
+        , lower)
+    if commercial_lender_signals:
+        # Exclude if they also offer residential (then they're dual-lender, keep standard)
+        has_residential_lending = re.search(
+            r'home\s+loan|residential\s+(?:loan|lending|mortgage)|mortgage\s+for\s+(?:your|home|buyer)'
+            r'|first[\-\s]?time\s+(?:home)?buyer|purchase\s+loan|refinanc'
+            , lower)
+        if not has_residential_lending:
             return 'commercial_lender'
 
     return 'standard'
@@ -1654,7 +1682,10 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
     #    Three-tier detection: text regex, HTML img regex, browser DOM signals
     #    DOM signals include: img:, svg:, aria:, svg-nearby:, img-near-eho:, footer-img:
     has_text = bool(EQUAL_HOUSING_RE.search(text))
-    has_img  = bool(EHO_IMG_RE.search(html))
+    # URL-decode HTML before matching so "Equal%20Housing%20Lender.svg" style
+    # filenames (from CDN URLs) are caught by the same regex.
+    html_for_eho = urllib.parse.unquote(html) if '%' in html else html
+    has_img  = bool(EHO_IMG_RE.search(html_for_eho))
     strong_dom = [s for s in (eho_signals or [])
                   if s.startswith(('img:', 'svg:', 'aria:', 'svg-nearby:', 'img-near-eho:', 'icon:',
                                    'textContent:', 'widget:', 'widget-img:', 'iframe:', 'footer-img:'))]
@@ -2296,9 +2327,9 @@ async def scan(req: ScanRequest, request: Request):
                     r.fix = ""
         elif entity_type == 'commercial_developer':
             for r in rule_results:
-                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'equal_housing'):
                     r.status = 'skip'
-                    r.description = f"Check not applicable — site classified as commercial real estate developer/investor."
+                    r.description = f"Check not applicable — site classified as commercial real estate (Fair Housing Act covers residential only)."
                     r.fix = ""
         elif entity_type == 'property_manager':
             for r in rule_results:
@@ -2308,9 +2339,9 @@ async def scan(req: ScanRequest, request: Request):
                     r.fix = ""
         elif entity_type == 'commercial_lender':
             for r in rule_results:
-                if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access'):
+                if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access', 'equal_housing'):
                     r.status = 'skip'
-                    r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage)."
+                    r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage). Fair Housing Act covers residential only."
                     r.fix = ""
         elif entity_type == 'dfpi_lender':
             for r in rule_results:
@@ -3085,9 +3116,9 @@ async def api_scan(req: ApiScanRequest, request: Request):
                     r.fix = ""
         elif entity_type == 'commercial_developer':
             for r in rule_results:
-                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'equal_housing'):
                     r.status = 'skip'
-                    r.description = f"Check not applicable — site classified as commercial real estate developer/investor."
+                    r.description = f"Check not applicable — site classified as commercial real estate (Fair Housing Act covers residential only)."
                     r.fix = ""
         elif entity_type == 'property_manager':
             for r in rule_results:
@@ -3097,9 +3128,9 @@ async def api_scan(req: ApiScanRequest, request: Request):
                     r.fix = ""
         elif entity_type == 'commercial_lender':
             for r in rule_results:
-                if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access'):
+                if r.id in ('tila_apr', 'safe_nmls', 'equal_housing_lender', 'nmls_consumer_access', 'equal_housing'):
                     r.status = 'skip'
-                    r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage)."
+                    r.description = f"Check not applicable — site classified as commercial/SBA lender (not residential mortgage). Fair Housing Act covers residential only."
                     r.fix = ""
         elif entity_type == 'dfpi_lender':
             for r in rule_results:
