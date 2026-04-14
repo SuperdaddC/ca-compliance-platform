@@ -1437,8 +1437,20 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
         r'|retail\s+(?:property|real\s+estate|leasing)\s+(?:invest|develop|advisor)'
         , lower)
     if commercial_re_signals:
-        # Don't misclassify residential agents who happen to mention commercial
-        has_residential = re.search(r'first[\-\s]?time\s+(?:home)?buyer|home\s+search|residential\s+(?:listing|sale)|open\s+house|property\s+search', lower)
+        # Don't misclassify residential agents/brokers who happen to mention commercial.
+        # "Residential & commercial" brokerages, home search tools, and sites calling
+        # themselves a "brokerage" or "realtor" are residential — keep as standard.
+        has_residential = re.search(
+            r'first[\-\s]?time\s+(?:home)?buyer'
+            r'|home\s+(?:search|buyer|seller|owner|valuation|value)'
+            r'|residential\s+(?:real\s+estate|listing|sale|brokerage|home|properties|propert)'
+            r'|residential\s+(?:and|&|/|\+)\s+commercial'
+            r'|commercial\s+(?:and|&|/|\+)\s+residential'
+            r'|open\s+house|property\s+search'
+            r'|single[\-\s]family\s+home'
+            r'|\brealtor\b|\brealty\b'
+            r'|boutique\s+brokerage|real\s+estate\s+brokerage'
+            , lower)
         if not has_residential and not re.search(r'\bdre\b\s*#?\s*\d{7,9}', lower):
             return 'commercial_developer'
 
