@@ -1196,6 +1196,58 @@ def extract_company_name(text: str) -> str:
     return ""
 
 
+async def _try_dfpi_lookups(text: str, url: str, html: str = "") -> bool:
+    """Try multiple strategies to identify a company for DFPI lookup.
+
+    Called when no DRE license is found on the page. Tries:
+    1. extract_company_name() — copyright lines, DBA, NMLS-adjacent names
+    2. Domain name as company name (e.g., "acmeloans.com" -> "Acme Loans")
+    3. HTML title tag (first segment before |/- separator)
+    """
+    # Strategy 1: standard extraction from page text
+    company_name = extract_company_name(text)
+    if company_name:
+        result = await lookup_dfpi(company_name)
+        if result:
+            log.info(f"DFPI match via extract_company_name: '{company_name}'")
+            return True
+
+    # Strategy 2: domain name as company name
+    from urllib.parse import urlparse
+    try:
+        hostname = urlparse(url).hostname or ""
+    except Exception:
+        hostname = ""
+    if hostname:
+        # Strip www. and TLD, convert hyphens to spaces, titlecase
+        domain_part = hostname.lower().replace("www.", "")
+        domain_part = domain_part.rsplit(".", 1)[0]  # remove .com/.net/etc
+        if domain_part and len(domain_part) >= 4:
+            # Convert "acmeloans" or "acme-loans" to "Acme Loans"
+            domain_name = domain_part.replace("-", " ").replace("_", " ").title()
+            result = await lookup_dfpi(domain_name)
+            if result:
+                log.info(f"DFPI match via domain name: '{domain_name}'")
+                return True
+
+    # Strategy 3: title tag — first segment before | or -
+    title_match = re.search(r'<title[^>]*>([^<]{3,80})', html[:10000], re.I) if html else None
+    if title_match:
+        title_text = title_match.group(1).strip()
+        # Take first segment before common separators
+        title_name = re.split(r'\s*[|–—\-]\s*', title_text)[0].strip()
+        # Only use if it looks like a name (2+ chars, not generic)
+        if title_name and len(title_name) >= 4 and title_name.lower() not in ('home', 'welcome', 'homepage'):
+            # Skip if same as what we already tried
+            if title_name.lower() != (company_name or "").lower():
+                result = await lookup_dfpi(title_name)
+                if result:
+                    log.info(f"DFPI match via title tag: '{title_name}'")
+                    return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Platform / web developer detection
 # ---------------------------------------------------------------------------
@@ -1642,25 +1694,24 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
         results.append(RuleResult("team_advertising", "Team Advertising Compliance", "skip",
             "No team name detected on this page — check not applicable."))
 
-    # 5. AB 723 — digitally altered image disclosure
+    # 5. AB 723 — digitally altered image disclosure (informational only — not scored)
     has_photos = bool(re.search(r'<img ', html, re.I))
     if not has_photos:
-        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "skip",
-            "No images detected on this page.",
+        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "info",
+            "No images detected on this page. AB 723 requires disclosure when listing photos are virtually staged or digitally altered.",
             source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723"))
     elif AB723_RE.search(text):
-        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "pass",
-            "Digitally altered image disclosure language found.",
+        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "info",
+            "Digitally altered image disclosure language found on this page.",
             source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723",
             regulation="California AB 723 (2024), adding Civil Code §1102.6e — Requires disclosure when listing photographs have been 'digitally staged' or 'virtually staged or digitally altered or enhanced.' The disclosure must be 'in a conspicuous manner' near the affected image."))
     else:
-        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "warn",
-            "Property images found but no AB 723 disclosure language detected.",
-            detail="If any property images on this site are virtually staged, digitally enhanced, or AI-generated, California AB 723 requires a conspicuous disclosure.",
+        results.append(RuleResult("ab723_images", "AB 723 — Altered Image Disclosure", "info",
+            "Reminder: If any property images on this site are virtually staged, digitally enhanced, or AI-generated, California AB 723 requires a conspicuous disclosure near those images.",
+            detail="AB 723 applies when listing photos have been digitally staged, virtually staged, or significantly altered. The scanner cannot determine whether images have been altered — this is a reminder to ensure compliance if applicable.",
             source_url="https://leginfo.legislature.ca.gov/faces/billNavClient.xhtml?bill_id=202320240AB723",
             regulation="California AB 723 (effective July 1, 2024), Civil Code §1102.6e — 'A listing that includes a photograph that has been digitally staged shall include a disclosure... that the photograph has been digitally staged.' Applies to virtual staging, AI-generated imagery, and significant digital alteration of property photos.",
-            fix="If any property photos are virtually staged or digitally altered, add this disclosure near those images: 'Photo(s) may be virtually staged or digitally enhanced.' The disclosure must be conspicuous — not hidden in fine print or buried at the bottom of the page.",
-            webmaster_email=WM_AB723))
+            fix="If any property photos are virtually staged or digitally altered, add this disclosure near those images: 'Photo(s) may be virtually staged or digitally enhanced.' The disclosure must be conspicuous — not hidden in fine print or buried at the bottom of the page."))
 
     # 6. Virtual office advertisement rules
     if VIRTUAL_OFFICE_RE.search(text):
@@ -2019,7 +2070,7 @@ async def check_ai_crawler_blocking(final_url: str) -> RuleResult:
 
 def score_results(results: list[RuleResult]) -> int:
     """Calculate 0-100 compliance score with weighted severity."""
-    scorable = [r for r in results if r.status != "skip"]
+    scorable = [r for r in results if r.status not in ("skip", "info")]
     if not scorable:
         return 100
     points = sum({"pass": 10, "warn": 5, "fail": 0}.get(r.status, 5) for r in scorable)
@@ -2214,13 +2265,11 @@ async def scan(req: ScanRequest, request: Request):
 
         # --- DFPI lookup (for entity classification + marketing sorting) ---
         dfpi_confirmed = False
-        if not dre_info or not dre_info.get("name"):
-            # No DRE license found — check if company is DFPI-regulated
-            company_name = extract_company_name(text)
-            if company_name:
-                dfpi_confirmed = await lookup_dfpi(company_name)
-                if dfpi_confirmed:
-                    log.info(f"DFPI confirmed via lookup: '{company_name}' for {url}")
+        if not dre_number:
+            # No DRE license found — try multiple strategies to find company for DFPI lookup
+            dfpi_confirmed = await _try_dfpi_lookups(text, url, html)
+            if dfpi_confirmed:
+                log.info(f"DFPI confirmed for {url}")
 
         # --- Entity classification ---
         entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed)
@@ -2239,13 +2288,13 @@ async def scan(req: ScanRequest, request: Request):
         # --- Skip inapplicable checks for non-standard entities ---
         if entity_type == 'nonprofit':
             for r in rule_results:
-                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site classified as nonprofit organization."
                     r.fix = ""
         elif entity_type == 'commercial_developer':
             for r in rule_results:
-                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site classified as commercial real estate developer/investor."
                     r.fix = ""
@@ -3006,12 +3055,10 @@ async def api_scan(req: ApiScanRequest, request: Request):
 
         # --- DFPI lookup (for entity classification + marketing sorting) ---
         dfpi_confirmed = False
-        if not dre_info or not dre_info.get("name"):
-            company_name = extract_company_name(text)
-            if company_name:
-                dfpi_confirmed = await lookup_dfpi(company_name)
-                if dfpi_confirmed:
-                    log.info(f"[api_scan] DFPI confirmed via lookup: '{company_name}' for {url}")
+        if not dre_number:
+            dfpi_confirmed = await _try_dfpi_lookups(text, url, html)
+            if dfpi_confirmed:
+                log.info(f"[api_scan] DFPI confirmed for {url}")
 
         # --- Entity classification ---
         entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed)
@@ -3030,13 +3077,13 @@ async def api_scan(req: ApiScanRequest, request: Request):
         # --- Skip inapplicable checks for non-standard entities ---
         if entity_type == 'nonprofit':
             for r in rule_results:
-                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site classified as nonprofit organization."
                     r.fix = ""
         elif entity_type == 'commercial_developer':
             for r in rule_results:
-                if r.id in ('dre_license', 'responsible_broker', 'team_advertising', 'ab723_images'):
+                if r.id in ('dre_license', 'responsible_broker', 'team_advertising'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site classified as commercial real estate developer/investor."
                     r.fix = ""
