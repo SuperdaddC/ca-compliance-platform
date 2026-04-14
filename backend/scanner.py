@@ -700,16 +700,18 @@ async def scrape_website(url: str) -> dict:
                     const src = (img.src || '').toLowerCase();
                     const alt = (img.alt || '').toLowerCase();
                     const allSrc = src + ' ' + dataSrc + ' ' + dataSrcset + ' ' + alt;
-                    // Skip known non-EHO images
-                    if (/social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor|google|pexels|unsplash|stock/i.test(alt + src + dataSrc))
+                    // Skip known non-EHO images (MLS logos, social icons, copyright marks)
+                    if (/social|facebook|twitter|instagram|linkedin|youtube|yelp|zillow|realtor|google|pexels|unsplash|stock|bareis|crmls|mlslistings|sdmls|carets|\bmls\b|copyright/i.test(alt + src + dataSrc))
                         return;
                     // Already captured by primary detection? Skip
                     if (test(allSrc)) return;
-                    // Only accept as potential EHO if filename/alt contains "logo" or "footer"
-                    // (EHO logos are commonly named "footer-logo", "Footer-logos-1", etc.)
-                    // Random images (UUIDs, photos, Google avatars) are excluded
-                    const hasLogoHint = /logo|footer.*img|eho|equal|housing|fair/i.test(alt + ' ' + (dataSrc || src));
-                    if (!hasLogoHint) return;
+                    // Only accept if filename or alt contains EHO-specific terms.
+                    // "logo" and "footer" alone are too ambiguous — they match MLS logos
+                    // (e.g., bareis_101px.png), copyright icons, and random hash filenames.
+                    // When EHO text is baked into a composite image without explicit naming,
+                    // detection requires OCR (not currently implemented).
+                    const hasEhoHint = /\beho\b|equal.?hous|fair.?hous|housing.?opp|equal.?opp/i.test(alt + ' ' + (dataSrc || src));
+                    if (!hasEhoHint) return;
                     const displaySrc = dataSrc || src;
                     signals.push('footer-img:' + w + 'x' + h + ':' + displaySrc.substring(displaySrc.lastIndexOf('/') + 1, displaySrc.lastIndexOf('/') + 40));
                 });
