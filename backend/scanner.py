@@ -1469,12 +1469,18 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
     has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}|\bcalbre\s*#?\s*\d{7,9}|\bbre\s*#?\s*\d{7,9}', lower))
     has_nmls = bool(re.search(r'\bnmls\s*[#:.]?\s*\d{4,10}', lower))
     if not has_dre_license:
-        # Strong lending signals in domain/URL (substring match — handles both
-        # separated patterns like "my-mortgage.com" and concatenated like
-        # "trulendingmortgage.com", "sandiegopurchaseloans.com")
-        domain_lending = bool(re.search(
-            r'mortgage|lending|loans?|\blender\b|loanofficer'
-            , url_lower))
+        # Primary domain name (stripped of www + TLD) — more reliable than full URL
+        primary_domain = ""
+        try:
+            from urllib.parse import urlparse as _up
+            host = (_up(url_lower).hostname or "").replace("www.", "")
+            primary_domain = host.rsplit(".", 1)[0] if "." in host else host
+        except Exception:
+            pass
+        # Strong domain signal: lending keyword is part of the primary domain name
+        strong_domain_lending = bool(re.search(r'mortgage|lending|loans?|lender|loanofficer', primary_domain))
+        # Weaker URL signal: keyword anywhere in URL (path, subdomain, etc.)
+        domain_lending = bool(re.search(r'mortgage|lending|loans?|\blender\b|loanofficer', url_lower))
         # Strong lending signals in page text
         text_lending = bool(re.search(
             r'\bloan\s+officer\b'
@@ -1486,9 +1492,11 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
             r'|\bmortgage\s+origination'
             r'|\bhome\s+(?:loan|mortgage|financing)\s+(?:officer|professional|specialist|advisor)'
             , lower))
-        # Must ALSO have NMLS to confirm it's a licensed lending entity
-        # (prevents catching general finance/advice blogs)
-        if has_nmls and (domain_lending or text_lending):
+        # Classify if EITHER:
+        #  (a) Strong domain signal alone (primary domain is literally "mortgage.com"
+        #      or "trulendingmortgage.com") — owner intent is clear
+        #  (b) Has NMLS license + any lending signal — confirms licensed lender
+        if strong_domain_lending or (has_nmls and (domain_lending or text_lending)):
             # Exclude sites that also claim to be real estate brokers/agents
             # (those are dual-licensed DRE + NMLS — keep as standard)
             dre_broker_claim = bool(re.search(
