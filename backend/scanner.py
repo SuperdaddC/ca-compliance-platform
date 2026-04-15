@@ -1332,14 +1332,15 @@ def _detect_platform(html: str, head_html: str, url: str) -> str:
 # ---------------------------------------------------------------------------
 # Entity classification — detect non-brokerage entities to skip inapplicable checks
 # ---------------------------------------------------------------------------
-def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = False) -> str:
+def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = False, url: str = "") -> str:
     """
     Classify the website entity type from page content.
     Returns one of: 'nonprofit', 'commercial_developer', 'property_manager',
-    'commercial_lender', 'dfpi_lender', 'national_bank', 'recruiting_site',
-    'blog_or_parked', or 'standard' (apply normal checks).
+    'commercial_lender', 'dfpi_lender', 'lending_entity', 'national_bank',
+    'recruiting_site', 'blog_or_parked', or 'standard' (apply normal checks).
     """
     lower = text.lower()
+    url_lower = (url or "").lower()
 
     # --- DFPI confirmed via external lookup ---
     if dfpi_confirmed:
@@ -1458,6 +1459,45 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
     if re.search(r'property\s+manag|residential\s+manag|tenant\s+(?:service|portal|login)|leasing\s+office|rent\s+(?:collection|payment)', lower):
         if not re.search(r'\bdre\b|\bbroker\b|\bagent\b|for\s+sale|\blisting\b', lower):
             return 'property_manager'
+
+    # --- Lending-focused entity (no DRE visible, strong lending signals) ---
+    # Catches DRE mortgage brokers who fail to display DRE# AND DFPI lenders
+    # not in the DFPI registry. Either way, they're lending entities and
+    # responsible_broker (DRE broker supervision) doesn't apply the same way.
+    # Note: dre_license rule still fires if DRE# missing, so compliance signal
+    # isn't lost — we just avoid double-flagging via responsible_broker.
+    has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}|\bcalbre\s*#?\s*\d{7,9}|\bbre\s*#?\s*\d{7,9}', lower))
+    has_nmls = bool(re.search(r'\bnmls\s*[#:.]?\s*\d{4,10}', lower))
+    if not has_dre_license:
+        # Strong lending signals in domain/URL
+        domain_lending = bool(re.search(
+            r'(?:^|//|\.)(?:\w+[\-_])?(?:mortgage|lending|loans?|lender|lendr|mortgag)'
+            r'|/loanofficer/|/loans?/|/mortgage/|loanofficer\.'
+            , url_lower))
+        # Strong lending signals in page text
+        text_lending = bool(re.search(
+            r'\bloan\s+officer\b'
+            r'|\bmortgage\s+broker\b'
+            r'|\bmortgage\s+banker\b'
+            r'|\bmortgage\s+(?:lender|lending|company|professional|advisor)\b'
+            r'|\bwholesale\s+lender\b'
+            r'|\bcorrespondent\s+lender\b'
+            r'|\bmortgage\s+origination'
+            r'|\bhome\s+(?:loan|mortgage|financing)\s+(?:officer|professional|specialist|advisor)'
+            , lower))
+        # Must ALSO have NMLS to confirm it's a licensed lending entity
+        # (prevents catching general finance/advice blogs)
+        if has_nmls and (domain_lending or text_lending):
+            # Exclude sites that also claim to be real estate brokers/agents
+            # (those are dual-licensed DRE + NMLS — keep as standard)
+            dre_broker_claim = bool(re.search(
+                r'\breal\s+estate\s+(?:broker|agent|salesperson|licensee)'
+                r'|\blicensed\s+(?:real\s+estate|california)\s+(?:broker|agent)'
+                r'|\brealtor\b.*\bnmls'
+                r'|\bdre\b.*(?:broker|licens)'
+                , lower))
+            if not dre_broker_claim:
+                return 'lending_entity'
 
     # SBA/commercial-only lender (not residential mortgage)
     # Fair Housing Act applies to residential lending — not SBA/commercial.
@@ -2317,7 +2357,7 @@ async def scan(req: ScanRequest, request: Request):
                 log.info(f"DFPI confirmed for {url}")
 
         # --- Entity classification ---
-        entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed)
+        entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed, url=url)
         if entity_type != 'standard':
             log.info(f"Entity classified as '{entity_type}' for {url}")
 
@@ -2365,6 +2405,21 @@ async def scan(req: ScanRequest, request: Request):
                 if r.id == 'equal_housing' and r.status == 'fail':
                     r.status = 'skip'
                     r.description = f"DFPI lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
+                    r.fix = ""
+        elif entity_type == 'lending_entity':
+            # Lending-focused sites (mortgage/loan domain, NMLS, no visible DRE).
+            # Skip responsible_broker (DRE broker supervision) and team_advertising
+            # (DRE team rules). Keep dre_license check — DRE mortgage brokers hiding
+            # their DRE# should still be flagged for that specific violation.
+            for r in rule_results:
+                if r.id in ('responsible_broker', 'team_advertising'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site is a lending-focused entity (NMLS-licensed). DRE broker supervision rules apply to real estate brokerages."
+                    r.fix = ""
+                # Swap EHO for EHL — lending sites need Equal Housing Lender
+                if r.id == 'equal_housing' and r.status == 'fail':
+                    r.status = 'skip'
+                    r.description = f"Lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
                     r.fix = ""
         elif entity_type == 'national_bank':
             for r in rule_results:
@@ -3106,7 +3161,7 @@ async def api_scan(req: ApiScanRequest, request: Request):
                 log.info(f"[api_scan] DFPI confirmed for {url}")
 
         # --- Entity classification ---
-        entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed)
+        entity_type = classify_entity(text, dre_info=dre_info, dfpi_confirmed=dfpi_confirmed, url=url)
         if entity_type != 'standard':
             log.info(f"[api_scan] Entity classified as '{entity_type}' for {url}")
 
@@ -3153,6 +3208,16 @@ async def api_scan(req: ApiScanRequest, request: Request):
                 if r.id == 'equal_housing' and r.status == 'fail':
                     r.status = 'skip'
                     r.description = f"DFPI lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
+                    r.fix = ""
+        elif entity_type == 'lending_entity':
+            for r in rule_results:
+                if r.id in ('responsible_broker', 'team_advertising'):
+                    r.status = 'skip'
+                    r.description = f"Check not applicable — site is a lending-focused entity (NMLS-licensed). DRE broker supervision rules apply to real estate brokerages."
+                    r.fix = ""
+                if r.id == 'equal_housing' and r.status == 'fail':
+                    r.status = 'skip'
+                    r.description = f"Lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
                     r.fix = ""
         elif entity_type == 'national_bank':
             for r in rule_results:
