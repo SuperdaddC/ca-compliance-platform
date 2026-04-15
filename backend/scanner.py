@@ -2420,15 +2420,13 @@ async def scan(req: ScanRequest, request: Request):
             # Skip responsible_broker (DRE broker supervision) and team_advertising
             # (DRE team rules). Keep dre_license check — DRE mortgage brokers hiding
             # their DRE# should still be flagged for that specific violation.
+            # KEEP equal_housing running — the EQUAL_HOUSING_RE regex already matches
+            # "Equal Housing Lender" (what lenders need) along with EHO, so this
+            # stays correct for lending sites.
             for r in rule_results:
                 if r.id in ('responsible_broker', 'team_advertising'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site is a lending-focused entity (NMLS-licensed). DRE broker supervision rules apply to real estate brokerages."
-                    r.fix = ""
-                # Swap EHO for EHL — lending sites need Equal Housing Lender
-                if r.id == 'equal_housing' and r.status == 'fail':
-                    r.status = 'skip'
-                    r.description = f"Lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
                     r.fix = ""
         elif entity_type == 'national_bank':
             for r in rule_results:
@@ -3219,14 +3217,17 @@ async def api_scan(req: ApiScanRequest, request: Request):
                     r.description = f"DFPI lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
                     r.fix = ""
         elif entity_type == 'lending_entity':
+            # Lending-focused sites (mortgage/loan domain, NMLS, no visible DRE).
+            # Skip responsible_broker (DRE broker supervision) and team_advertising
+            # (DRE team rules). Keep dre_license check — DRE mortgage brokers hiding
+            # their DRE# should still be flagged for that specific violation.
+            # KEEP equal_housing running — the EQUAL_HOUSING_RE regex already matches
+            # "Equal Housing Lender" (what lenders need) along with EHO, so this
+            # stays correct for lending sites.
             for r in rule_results:
                 if r.id in ('responsible_broker', 'team_advertising'):
                     r.status = 'skip'
                     r.description = f"Check not applicable — site is a lending-focused entity (NMLS-licensed). DRE broker supervision rules apply to real estate brokerages."
-                    r.fix = ""
-                if r.id == 'equal_housing' and r.status == 'fail':
-                    r.status = 'skip'
-                    r.description = f"Lenders need 'Equal Housing Lender' (checked separately), not 'Equal Housing Opportunity'."
                     r.fix = ""
         elif entity_type == 'national_bank':
             for r in rule_results:
