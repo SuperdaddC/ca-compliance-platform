@@ -1469,10 +1469,11 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
     has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}|\bcalbre\s*#?\s*\d{7,9}|\bbre\s*#?\s*\d{7,9}', lower))
     has_nmls = bool(re.search(r'\bnmls\s*[#:.]?\s*\d{4,10}', lower))
     if not has_dre_license:
-        # Strong lending signals in domain/URL
+        # Strong lending signals in domain/URL (substring match — handles both
+        # separated patterns like "my-mortgage.com" and concatenated like
+        # "trulendingmortgage.com", "sandiegopurchaseloans.com")
         domain_lending = bool(re.search(
-            r'(?:^|//|\.)(?:\w+[\-_])?(?:mortgage|lending|loans?|lender|lendr|mortgag)'
-            r'|/loanofficer/|/loans?/|/mortgage/|loanofficer\.'
+            r'mortgage|lending|loans?|\blender\b|loanofficer'
             , url_lower))
         # Strong lending signals in page text
         text_lending = bool(re.search(
