@@ -1701,6 +1701,34 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
             if dre_info.get("designated_officer"):
                 dre_designated_officer = dre_info["designated_officer"]
 
+    # Broker-name match: if DRE is a salesperson and the responsible broker's
+    # distinctive name words appear in the page text, treat it as satisfying
+    # Regulation §2773.1 (broker name identified). §2773.1 requires the name —
+    # DRE number is best practice but not strictly mandated when the name is
+    # prominent.
+    def _broker_name_in_text(broker_name: str, page_text: str) -> bool:
+        if not broker_name or not page_text:
+            return False
+        # Strip common corporate suffixes and stopwords; require 2+ significant
+        # words to match to avoid single-word false positives (e.g., "Realty").
+        stopwords = {"inc", "incorporated", "corp", "corporation", "llc", "llp",
+                     "lp", "ltd", "co", "company", "the", "and", "of", "a", "&"}
+        words = [w.lower().strip(".,") for w in re.split(r'[\s,]+', broker_name)]
+        sig = [w for w in words if w and w not in stopwords and len(w) >= 3]
+        if len(sig) < 2:
+            return False
+        page_lower = page_text.lower()
+        # Require at least the first two distinctive words to appear within
+        # 60 chars of each other so "Reliable" + "Realty" counts but the
+        # pair "real" + "estate" scattered across the page doesn't.
+        w1, w2 = sig[0], sig[1]
+        pattern = re.compile(
+            rf'\b{re.escape(w1)}\b.{{0,60}}\b{re.escape(w2)}\b'
+            rf'|\b{re.escape(w2)}\b.{{0,60}}\b{re.escape(w1)}\b',
+            re.I | re.S,
+        )
+        return bool(pattern.search(page_lower))
+
     if has_broker_text:
         results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "pass",
             "Responsible broker disclosure found.",
@@ -1719,25 +1747,36 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
         rb_name = dre_info.get("responsible_broker") or "Unknown"
         rb_lic = dre_info.get("responsible_broker_lic") or ""
         rb_addr = dre_info.get("responsible_broker_address") or ""
-        rb_detail = f"Salesperson websites must identify the responsible/supervising broker by name and DRE license number."
-        if rb_lic:
-            rb_detail += f"\n\nDRE records show responsible broker: {rb_name}, DRE #{rb_lic}"
-            if rb_addr:
-                rb_detail += f", {rb_addr}"
-        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "warn",
-            f"DRE #{dre_number} is a salesperson license ({dre_info['name']}). Supervising broker not identified on page.",
-            detail=rb_detail,
-            source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
-            regulation="Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
-            fix=f"Add your supervising broker's name and DRE number to your footer: '{rb_name}, DRE #{rb_lic}'." if rb_lic else "Add your supervising broker's name and DRE number to your footer."))
+        # If the broker's distinctive name words appear in the page text,
+        # Regulation §2773.1's "name of the broker must appear" is satisfied.
+        if rb_name and rb_name != "Unknown" and _broker_name_in_text(rb_name, text):
+            results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "pass",
+                f"Broker name '{rb_name}' found on page (salesperson DRE #{dre_number} → {dre_info['name']}).",
+                detail=f"Regulation §2773.1 requires the broker's name to appear in advertising. DRE records show responsible broker: {rb_name}" + (f", DRE #{rb_lic}" if rb_lic else "") + (f", {rb_addr}" if rb_addr else "") + ". Consider also displaying the broker's DRE number for best practice.",
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="California Business & Professions Code §10159.5 — Commissioner's Regulation §2773.1 — Broker name must appear in advertising."))
+        else:
+            rb_detail = f"Salesperson websites must identify the responsible/supervising broker by name and DRE license number."
+            if rb_lic:
+                rb_detail += f"\n\nDRE records show responsible broker: {rb_name}, DRE #{rb_lic}"
+                if rb_addr:
+                    rb_detail += f", {rb_addr}"
+            results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "warn",
+                f"DRE #{dre_number} is a salesperson license ({dre_info['name']}). Supervising broker not identified on page.",
+                detail=rb_detail,
+                source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
+                regulation="Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
+                fix=f"Add your supervising broker's name and DRE number to your footer: '{rb_name}, DRE #{rb_lic}'." if rb_lic else "Add your supervising broker's name and DRE number to your footer."))
     else:
-        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "fail",
-            "No responsible or supervising broker identified on this page.",
-            detail="Your website must identify the supervising/responsible broker by name and DRE license number.",
+        # No DRE license found on the page — dre_license rule already flags
+        # this, so skip responsible_broker to avoid a redundant failure. If
+        # there's no licensee we can identify, there's no broker derivation
+        # we can make.
+        results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "skip",
+            "No DRE license number found — responsible broker rule cannot apply until a license is identified.",
+            detail="The DRE license rule has already flagged the missing license. Once a DRE # is added, this check will verify broker disclosure.",
             source_url="https://www.dre.ca.gov/Licensees/AdvertisingGuidelines.html",
-            regulation="California Business & Professions Code §10159.5 — Salesperson advertising must include broker identity. Commissioner's Regulation §2773.1 — 'The name of the broker must appear in advertising in a manner that is at least as prominent as the name of the salesperson.'",
-            fix="Add to your site footer: '[Your Name], DRE #[Your Number] | [Brokerage Name], DRE #[Broker Number]'.",
-            webmaster_email=WM_RESPONSIBLE_BROKER))
+            regulation="Commissioner's Regulation §2773.1"))
 
     # 3. Equal Housing Opportunity
     #    Three-tier detection: text regex, HTML img regex, browser DOM signals
