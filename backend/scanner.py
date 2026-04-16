@@ -893,8 +893,8 @@ async def scrape_website(url: str) -> dict:
 
 # --- Shared patterns ---
 DRE_LICENSE_RE = re.compile(
-    r'\bdre\s*(?:(?:no|lic)\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "DRE #", "DRE No.", "DRE Lic. #"
-    r'|\bbre\s*(?:(?:no|lic)\.?)?\s*[#:.]?\s*\d{7,9}\b' # legacy "BRE #" prefix (pre-2018 branding)
+    r'\bdre\s*(?:(?:no|lic|id)\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "DRE #", "DRE No.", "DRE Lic. #", "DRE ID"
+    r'|\bbre\s*(?:(?:no|lic|id)\.?)?\s*[#:.]?\s*\d{7,9}\b' # legacy "BRE #" prefix (pre-2018 branding)
     r'|\bcalifornia\s+real\s+estate\s+broker\s*[#:.]?\s*\d{7,9}\b'
     r'|\bcalbre\s*[#:.]?\s*\d{7,9}\b'
     r'|\bca[\s\-]+dre\s*(?:(?:no|lic)\.?)?\s*[#:.]?\s*\d{7,9}\b'  # "CA DRE Lic. # 01215391"
@@ -1344,7 +1344,7 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
 
     # --- DFPI confirmed via external lookup ---
     if dfpi_confirmed:
-        has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}', lower))
+        has_dre_license = bool(re.search(r'\bdre\s*(?:(?:no|lic|id)\.?)?\s*[#:.]?\s*\d{7,9}', lower))
         if not has_dre_license:
             return 'dfpi_lender'
 
@@ -1367,7 +1367,7 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
         , lower)
     if dfpi_signals:
         # Confirm it's a lender, not a DRE broker who also mentions DFPI
-        has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}', lower))
+        has_dre_license = bool(re.search(r'\bdre\s*(?:(?:no|lic|id)\.?)?\s*[#:.]?\s*\d{7,9}', lower))
         # If they have BOTH DRE and DFPI, they're dual-licensed — keep as standard
         if not has_dre_license:
             return 'dfpi_lender'
@@ -1466,7 +1466,7 @@ def classify_entity(text: str, dre_info: dict = None, dfpi_confirmed: bool = Fal
     # responsible_broker (DRE broker supervision) doesn't apply the same way.
     # Note: dre_license rule still fires if DRE# missing, so compliance signal
     # isn't lost — we just avoid double-flagging via responsible_broker.
-    has_dre_license = bool(re.search(r'\bdre\s*#?\s*\d{7,9}|\bcalbre\s*#?\s*\d{7,9}|\bbre\s*#?\s*\d{7,9}', lower))
+    has_dre_license = bool(re.search(r'\bdre\s*(?:(?:no|lic|id)\.?)?\s*[#:.]?\s*\d{7,9}|\bcalbre\s*[#:.]?\s*\d{7,9}|\bbre\s*(?:(?:no|lic|id)\.?)?\s*[#:.]?\s*\d{7,9}', lower))
     has_nmls = bool(re.search(r'\bnmls\s*[#:.]?\s*\d{4,10}', lower))
     if not has_dre_license:
         # Primary domain name (stripped of www + TLD) — more reliable than full URL
