@@ -1749,7 +1749,9 @@ def run_realestate_checks(text: str, html: str, eho_signals: list = None,
         rb_addr = dre_info.get("responsible_broker_address") or ""
         # If the broker's distinctive name words appear in the page text,
         # Regulation §2773.1's "name of the broker must appear" is satisfied.
-        if rb_name and rb_name != "Unknown" and _broker_name_in_text(rb_name, text):
+        _name_match = rb_name and rb_name != "Unknown" and _broker_name_in_text(rb_name, text)
+        log.info(f"responsible_broker name check: rb_name={rb_name!r} text_has_reliable={'reliable' in text} text_has_realty={'realty' in text} match={_name_match}")
+        if _name_match:
             results.append(RuleResult("responsible_broker", "Responsible Broker Disclosure", "pass",
                 f"Broker name '{rb_name}' found on page (salesperson DRE #{dre_number} → {dre_info['name']}).",
                 detail=f"Regulation §2773.1 requires the broker's name to appear in advertising. DRE records show responsible broker: {rb_name}" + (f", DRE #{rb_lic}" if rb_lic else "") + (f", {rb_addr}" if rb_addr else "") + ". Consider also displaying the broker's DRE number for best practice.",
